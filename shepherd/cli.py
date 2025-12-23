@@ -166,6 +166,31 @@ def _do_sync(remote, remote_dir, quiet=False):
     return True
 
 
+def _sync_script_to_remote(remote, script_path, remote_dir="~/.local/lib/shepherd"):
+    """Sync a script file to the remote host. Returns remote path."""
+    expanded = os.path.expanduser(script_path)
+    if not os.path.isfile(expanded):
+        print(f"Script not found: {expanded}", file=sys.stderr)
+        return None
+
+    # Create scripts directory on remote
+    scripts_dir = f"{remote_dir}/scripts"
+    mkdir_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR", remote,
+                 f"mkdir -p {scripts_dir}"]
+    subprocess.run(mkdir_cmd, capture_output=True)
+
+    # Copy script to remote
+    basename = os.path.basename(expanded)
+    remote_path = f"{scripts_dir}/{basename}"
+    scp_cmd = ["scp", "-o", "LogLevel=ERROR", expanded, f"{remote}:{remote_path}"]
+    result = subprocess.run(scp_cmd, capture_output=True)
+    if result.returncode != 0:
+        print(f"Failed to sync script to remote: {result.stderr.decode()}", file=sys.stderr)
+        return None
+
+    return remote_path
+
+
 def _auto_sync_if_needed(args):
     """Auto-sync to remote if code has changed."""
     if not getattr(args, "remote", None):
@@ -385,9 +410,15 @@ def cmd_new(args):
 
     # Handle remote execution early - let remote host do partition discovery
     if getattr(args, "remote", None):
+        # Sync script to remote host first
+        remote_dir = getattr(args, "remote_dir", "~/.local/lib/shepherd")
+        remote_script = _sync_script_to_remote(args.remote, script, remote_dir)
+        if not remote_script:
+            return 1
+
         # Build remote args, passing through GPU/partition options
         # Remote host will do the partition discovery
-        remote_args = ["new", script]
+        remote_args = ["new", remote_script]
         if args.run_id:
             remote_args.extend(["--run-id", args.run_id])
         if args.mode:
