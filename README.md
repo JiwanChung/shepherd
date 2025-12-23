@@ -1,95 +1,376 @@
-# Shepherd
+<div align="center">
 
-User-space Slurm job shepherd with automatic restart, heartbeat monitoring, node blacklisting, and a TUI.
+# 🐑 Shepherd
+
+**A resilient Slurm job orchestrator that keeps your GPU workloads running**
+
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-3776ab.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=flat)](LICENSE)
+[![Slurm](https://img.shields.io/badge/slurm-compatible-orange.svg?style=flat)](https://slurm.schedmd.com/)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg?style=flat)]()
+
+[Features](#features) • [Installation](#install) • [Quick Start](#quick-start) • [Documentation](#how-it-works) • [Contributing](#tests)
+
+</div>
+
+---
+
+## The Problem
+
+Running ML training jobs on shared Slurm clusters is painful:
+
+- 🔥 Nodes go down mid-training
+- 💥 GPUs throw random CUDA errors
+- 🚧 Partitions get congested
+- ⏰ Preemption kills your 3-day run at hour 71
+
+**Shepherd watches your jobs and handles failures automatically** — so you can sleep while your models train.
+
+---
 
 ## Features
 
-- Run-once and indefinite run modes
-- Heartbeat and progress stall detection
-- Automatic restart with backoff
-- Node blacklist with TTL
-- Terminal UI for monitoring and control
-- Works without admin privileges (Slurm CLI + shared filesystem)
+<table>
+<tr>
+<td width="50%">
+
+### 🔄 Automatic Recovery
+- **Heartbeat monitoring** — Detects hung jobs
+- **GPU fault detection** — Catches CUDA errors early
+- **Node blacklisting** — Avoids problematic nodes
+- **Exponential backoff** — Smart retry delays
+
+</td>
+<td width="50%">
+
+### 🎯 Smart Scheduling
+- **Partition auto-discovery** — Finds matching GPUs
+- **Partition failover** — Tries next queue on failure
+- **VRAM filtering** — 40GB+, 80GB+, etc.
+- **Preference modes** — Best or cheapest first
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### 🖥️ Modern Interface
+- **Interactive TUI** — Beautiful terminal UI
+- **Node management** — Ban/unban with keyboard
+- **Log viewer** — Tail logs in real-time
+- **Status icons** — See state at a glance
+
+</td>
+<td width="50%">
+
+### 🌐 Remote Clusters
+- **SSH execution** — Run on remote clusters
+- **Auto-sync** — Code syncs when changed
+- **Zero setup** — Uses your SSH config
+- **No admin required** — Standard Slurm CLI only
+
+</td>
+</tr>
+</table>
+
+---
 
 ## Install
 
-This repo is pure Python and runs from source.
+```bash
+git clone <repo> && cd shepherd
+uv tool install .
+```
 
-## Quick start
+Or run directly from source:
 
-1. Create a run directory and `meta.json`:
+```bash
+python -m shepherd --help
+```
+
+## Quick Start
+
+Create a script (`train.sh`):
+
+```bash
+#!/bin/bash
+#SHEPHERD --gpus 4 --min-vram 40
+
+python train.py
+```
+
+All `#SHEPHERD` directives (CLI flags override these):
+
+| Directive | Description |
+|-----------|-------------|
+| `--gpus N` | Minimum GPUs per node |
+| `--min-vram N` | Minimum VRAM per GPU (GB) |
+| `--max-vram N` | Maximum VRAM per GPU (GB) |
+| `--prefer min\|max` | Partition ordering |
+| `--mode run_once\|indefinite` | Run mode |
+| `--partitions a,b,c` | Manual partition list |
+| `--max-retries N` | Max restart attempts |
+| `--keep-alive N` | Duration in seconds (indefinite mode) |
+| `--heartbeat-interval N` | Heartbeat frequency (seconds) |
+| `--heartbeat-grace N` | Grace period before restart (seconds) |
+| `--backoff-base N` | Base backoff delay (seconds) |
+| `--backoff-max N` | Max backoff delay (seconds) |
+| `--blacklist-ttl N` | Node blacklist duration (seconds) |
+
+Run with shepherd:
+
+```bash
+shepherd train.sh
+shepherd
+```
+
+Shepherd parses `#SHEPHERD` directives, auto-discovers matching GPU partitions, and orders them best-first. Use `--prefer min` for cheapest-first. Jobs auto-restart on preemption with bad node blacklisting.
+
+## TUI
+
+A modern terminal interface for monitoring and controlling jobs:
 
 ```
-mkdir -p ~/.slurm_shepherd/runs/demo
-cat > ~/.slurm_shepherd/runs/demo/meta.json <<'JSON'
+┌──────────────────────────────────── SHEPHERD ─────────────────────────────────────┐
+│ 3 runs · 2 running · 1 pending                                                    │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│  ▸ llama-finetune       ● running    job=284719    2h ago                         │
+│    gpt-evaluation       ● running    job=284720    45m ago                        │
+│    mistral-pretrain     ◐ pending    job=284721    5m ago                         │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│ ────────────────── SLURM ──────────────────  ────────────────── RUN ────────────  │
+│  Job ID      284719                           Heartbeat   5s ago                  │
+│  State       RUNNING                          Restarts    2                       │
+│  Partition   gpu-a100                         Mode        indefinite              │
+│  Node        gpu-node-042                                                         │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│  ↑↓ navigate  Tab panel  r restart  s stop  p pause  q quit                      │
+└───────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `j/k` or arrows | Navigate runs |
+| `Tab` | Cycle right panel: INFO → SCRIPT → LOGS |
+| `[/]` or `-/=` | Scroll right panel |
+| `PgUp/PgDn` | Scroll by page |
+| `1/2` | Switch stdout/stderr (in LOGS tab) |
+| `r` | Restart selected run |
+| `s` | Stop selected run |
+| `p/u` | Pause/unpause |
+| `n` | Create new run |
+| `b` | Manage blacklist |
+| `/` | Filter runs |
+| `o` | Cycle sort order |
+| `Enter` | Fullscreen detail view |
+| `?` | Help |
+| `q` | Quit |
+
+### Status Icons
+
+| Icon | Status |
+|------|--------|
+| `●` | Healthy running |
+| `◐` | Running (degraded/paused) |
+| `○` | Pending |
+| `↻` | Restarting |
+| `✖` | Unresponsive |
+| `✓` | Completed |
+| `■` | Stopped |
+
+### Log Viewing
+
+The LOGS tab automatically finds Slurm output files:
+
+1. Explicit path from `meta.json` (`stdout_path` / `stderr_path`)
+2. Parsed from sbatch script (`#SBATCH --output=...`)
+3. Default Slurm pattern `slurm-<job_id>.out`
+4. Fallback to shepherd run directory
+
+## Remote Execution
+
+Run shepherd on a remote Slurm cluster via SSH:
+
+```bash
+# Sync code to remote (one-time)
+shepherd --remote mycluster sync
+
+# Run TUI on remote (with TTY)
+shepherd --remote mycluster tui
+
+# Other commands
+shepherd --remote mycluster list
+shepherd --remote mycluster status --run-id my-job
+shepherd --remote mycluster control restart --run-id my-job
+```
+
+The daemon auto-starts on the remote host. Options:
+
+| Flag | Description |
+|------|-------------|
+| `--remote HOST` | SSH host (from ~/.ssh/config) |
+| `--remote-python CMD` | Custom Python command |
+| `--remote-dir DIR` | Sync destination (default: ~/.local/lib/shepherd) |
+
+## Partition Fallback
+
+Automatically failover to backup partitions when submission fails:
+
+```json
 {
-  "run_id": "demo",
+  "run_id": "my-job",
   "run_mode": "run_once",
-  "sbatch_script": "/path/to/sbatch_wrapper.sh",
-  "sbatch_args": "",
-  "created_at": 0
+  "sbatch_script": "~/jobs/train.sh",
+  "partition_fallback": {
+    "partitions": ["gpu-high", "gpu-low", "cpu"],
+    "retry_per_partition": 2,
+    "reset_to_preferred_sec": 3600
+  }
 }
-JSON
 ```
 
-2. Start the daemon:
+| Field | Default | Description |
+|-------|---------|-------------|
+| `partitions` | required | Ordered list (first = preferred) |
+| `retry_per_partition` | 2 | Failures before next partition |
+| `reset_to_preferred_sec` | 3600 | Interval to retry preferred |
+
+## How It Works
+
+Shepherd wraps your script with monitoring and manages the full lifecycle:
 
 ```
-python -m shepherd daemon
+                                    ┌─────────────────────────────┐
+                                    │      Your Training Job      │
+                                    │    (python train.py, etc)   │
+                                    └──────────────┬──────────────┘
+                                                   │
+                                    ┌──────────────▼──────────────┐
+                                    │     Shepherd Wrapper        │
+                                    │  • GPU visibility check     │
+                                    │  • CUDA smoke test          │
+                                    │  • Heartbeat thread         │
+                                    │  • Failure reporting        │
+                                    └──────────────┬──────────────┘
+                                                   │
+┌─────────────────────────────────────────────────▼─────────────────────────────────────────────────┐
+│                                      Shepherd Daemon                                              │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐            │
+│  │   Monitor   │  │  Heartbeat  │  │   Auto-     │  │  Partition  │  │    Node     │            │
+│  │  Job State  │  │ Validation  │  │  Restart    │  │  Failover   │  │ Blacklist   │            │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘            │
+└─────────────────────────────────────────────────┬─────────────────────────────────────────────────┘
+                                                   │
+                                    ┌──────────────▼──────────────┐
+                                    │           Slurm             │
+                                    │   sbatch / squeue / scancel │
+                                    └─────────────────────────────┘
 ```
 
-3. Open the TUI:
+**The wrapper provides:**
+- **Heartbeat** — Detect stuck jobs before wasting hours
+- **GPU probes** — Fail fast on bad nodes (CUDA test, visibility check)
+- **Exit codes** — Semantic codes trigger appropriate recovery actions
 
+## CLI Reference
+
+```bash
+# Create a run (auto-discovers GPU partitions)
+shepherd train.sh                                      # uses #SHEPHERD directives from script
+shepherd train.sh --gpus 4 --min-vram 40               # override: 4+ GPUs, 40GB+ VRAM
+shepherd train.sh --gpus 4 --min-vram 40 --max-vram 48 # 40-48GB range
+shepherd train.sh --prefer min                         # cheapest-first ordering
+
+# Open TUI
+shepherd
+
+# List runs
+shepherd list
+
+# Check status
+shepherd status --run-id my-job
+
+# Control operations
+shepherd control pause --run-id my-job
+shepherd control unpause --run-id my-job
+shepherd control stop --run-id my-job
+shepherd control restart --run-id my-job
+
+# Node management
+shepherd nodes                                         # list all nodes with blacklist status
+shepherd nodes ban --node node001 --ttl 3600 --reason "Bad GPU"
+shepherd nodes unban --node node001
+
+# TUI
+shepherd tui
 ```
-python -m shepherd tui
-```
 
-## Wrapper usage
+Add `--json` for machine-readable output. All commands support `--remote HOST` for remote execution.
 
-Use the wrapper inside your sbatch script:
+## Configuration
 
-```
-python -m shepherd.wrapper \
-  --run-id demo \
-  --run-mode run_once \
-  --state-dir ~/.slurm_shepherd \
-  --heartbeat-interval 30 \
-  -- \
-  /path/to/your/workload --arg1 value1
-```
+### meta.json fields
 
-An example sbatch script is in `examples/sbatch_wrapper.sh`.
+| Field | Type | Description |
+|-------|------|-------------|
+| `run_id` | string | Unique identifier |
+| `run_mode` | string | `run_once` or `indefinite` |
+| `sbatch_script` | string | Path to sbatch script |
+| `sbatch_args` | string/list | Extra sbatch arguments |
+| `max_retries` | int | Max restarts for run_once mode |
+| `keep_alive_sec` | int | Duration for indefinite mode |
+| `heartbeat_interval_sec` | int | Expected heartbeat interval (default: 30) |
+| `heartbeat_grace_sec` | int | Grace period before restart (default: 90) |
+| `progress_stall_sec` | int | Max time without progress update |
+| `backoff_base_sec` | int | Base backoff delay (default: 10) |
+| `backoff_max_sec` | int | Max backoff delay (default: 300) |
+| `blacklist_ttl_sec` | int | How long to blacklist bad nodes |
+| `blacklist_limit` | int | Max nodes to exclude (default: 64) |
+| `partition_fallback` | object | Partition failover config |
 
-## CLI
-
-```
-python -m shepherd list
-python -m shepherd status --run-id demo
-python -m shepherd control pause --run-id demo
-python -m shepherd control restart --run-id demo
-python -m shepherd control blacklist-add --node node001
-```
-
-## State layout
+## State Directory
 
 All state lives under `~/.slurm_shepherd/`:
 
 ```
-runs/<run_id>/
-  meta.json
-  control.json
-  heartbeat
-  progress.json
-  failure.json
-  final.json
-  ended.json
-  badnode_events.log
-blacklist.json
-locks/<run_id>.lock
+~/.slurm_shepherd/
+├── runs/
+│   └── <run_id>/
+│       ├── meta.json          # Run configuration
+│       ├── control.json       # Control signals (pause, stop, etc.)
+│       ├── heartbeat          # Last heartbeat timestamp
+│       ├── progress.json      # Progress updates from wrapper
+│       ├── failure.json       # Last failure info
+│       ├── final.json         # Completion marker
+│       ├── ended.json         # Termination reason
+│       └── badnode_events.log # Node failure history
+├── blacklist.json             # Global node blacklist
+├── locks/                     # Per-run locks
+└── daemon.pid                 # Daemon PID file
 ```
 
 ## Tests
 
+```bash
+python -m unittest discover -s tests -v
 ```
-python -m unittest discover -s tests
-```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit issues and pull requests.
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+**[⬆ Back to top](#-shepherd)**
+
+<sub>Built with frustration from too many failed training runs 🔥</sub>
+
+</div>

@@ -2,3 +2,19 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+
+# Packaging
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.venv/
+venv/
+.env

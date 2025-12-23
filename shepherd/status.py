@@ -36,10 +36,19 @@ def compute_status(meta, control, ended, final, heartbeat_ts, slurm_state=None, 
         if slurm_state in {"FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"}:
             return STATUS_RESTARTING
 
-    if heartbeat.is_stale(heartbeat_ts, now=now):
+    # No slurm_state means job not submitted yet
+    slurm_job_id = meta.get("slurm_job_id") if isinstance(meta, dict) else None
+    if slurm_job_id is None:
+        # Job waiting to be submitted
+        if isinstance(control, dict) and control.get("paused"):
+            return STATUS_STOPPED
+        return STATUS_PENDING
+
+    # Job was submitted but no longer in queue (finished or lost)
+    if heartbeat_ts is not None and heartbeat.is_stale(heartbeat_ts, now=now):
         return STATUS_UNRESPONSIVE
 
     if isinstance(control, dict) and control.get("paused"):
         return STATUS_DEGRADED
 
-    return STATUS_UNKNOWN
+    return STATUS_RESTARTING

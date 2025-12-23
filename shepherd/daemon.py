@@ -1,5 +1,8 @@
+import atexit
 import os
 import shlex
+import signal
+import sys
 import time
 
 from shepherd import backoff
@@ -11,6 +14,41 @@ from shepherd import slurm
 from shepherd import state
 
 
+def is_daemon_running():
+    """Check if a daemon is already running by reading the PID file."""
+    pid_path = constants.DAEMON_PID_PATH
+    if not os.path.exists(pid_path):
+        return False
+    try:
+        with open(pid_path, "r") as f:
+            pid = int(f.read().strip())
+        # Check if process exists
+        os.kill(pid, 0)
+        return True
+    except (ValueError, ProcessLookupError, PermissionError, FileNotFoundError):
+        # PID file is stale or invalid
+        try:
+            os.remove(pid_path)
+        except OSError:
+            pass
+        return False
+
+
+def _write_pid_file():
+    """Write current PID to the daemon PID file."""
+    os.makedirs(os.path.dirname(constants.DAEMON_PID_PATH), exist_ok=True)
+    with open(constants.DAEMON_PID_PATH, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _remove_pid_file():
+    """Remove the daemon PID file."""
+    try:
+        os.remove(constants.DAEMON_PID_PATH)
+    except OSError:
+        pass
+
+
 class ShepherdDaemon:
     def __init__(self, poll_interval_sec=10):
         self.poll_interval_sec = poll_interval_sec
@@ -18,10 +56,26 @@ class ShepherdDaemon:
 
     def run(self):
         fs.ensure_dirs()
+        if is_daemon_running():
+            print("Daemon is already running", file=sys.stderr)
+            return 1
+        _write_pid_file()
+        atexit.register(_remove_pid_file)
+
+        def _handle_signal(signum, frame):
+            self._running = False
+
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+
         self._running = True
-        while self._running:
-            self._tick()
-            time.sleep(self.poll_interval_sec)
+        try:
+            while self._running:
+                self._tick()
+                time.sleep(self.poll_interval_sec)
+        finally:
+            _remove_pid_file()
+        return 0
 
     def stop(self):
         self._running = False
@@ -101,6 +155,32 @@ class ShepherdDaemon:
                 slurm_state = job_info.get("state")
                 slurm_reason = job_info.get("reason")
             else:
+                # Job not in squeue - check sacct for final state
+                sacct_info = slurm.sacct(slurm_job_id)
+                if sacct_info:
+                    sacct_state = sacct_info.get("state", "")
+                    exit_code = sacct_info.get("exit_code", 1)
+                    node = sacct_info.get("node")
+
+                    if sacct_state == "COMPLETED" and exit_code == 0:
+                        # Job completed successfully - mark as done for run_once
+                        if run_mode == "run_once" and final is None:
+                            state.write_final(run_id)
+                            state.write_ended(run_id, {"reason": "completed", "timestamp": now})
+                            return
+                    elif sacct_state in ("FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL"):
+                        # Job failed - record for restart and maybe blacklist
+                        if node and sacct_state in ("NODE_FAIL", "TIMEOUT"):
+                            ttl = meta.get("blacklist_ttl_sec")
+                            blacklist.add_node(node, ttl_sec=ttl, reason=sacct_state)
+                        self._record_restart(run_id, meta, now, reason=sacct_state.lower())
+                        state.update_meta(run_id, {"slurm_job_id": None})
+                        return
+                    elif sacct_state in ("CANCELLED", "PREEMPTED"):
+                        # Preempted - restart without penalty
+                        state.update_meta(run_id, {"slurm_job_id": None, "next_submit_at": now})
+                        return
+
                 slurm_job_id = None
 
         if slurm_state:
@@ -216,6 +296,91 @@ class ShepherdDaemon:
             existing = ""
         fs.atomic_write_text(path, (existing or "") + line)
 
+    def _get_partition_arg(self, meta, now):
+        """Determine the partition argument to use, considering fallback logic."""
+        fallback_config = meta.get("partition_fallback")
+        if not fallback_config:
+            return None
+
+        partitions = fallback_config.get("partitions", [])
+        if not partitions:
+            return None
+
+        current_index = meta.get("current_partition_index", 0)
+        reset_sec = fallback_config.get(
+            "reset_to_preferred_sec", constants.DEFAULT_RESET_TO_PREFERRED_SEC
+        )
+        last_preferred = meta.get("last_preferred_attempt_at")
+
+        # Periodically try preferred partition again
+        if current_index > 0 and last_preferred is not None:
+            if now - int(last_preferred) >= reset_sec:
+                current_index = 0
+                state.update_meta(
+                    meta.get("run_id"),
+                    {
+                        "current_partition_index": 0,
+                        "partition_failure_count": 0,
+                        "last_preferred_attempt_at": now,
+                    },
+                )
+
+        # Clamp index to valid range
+        if current_index >= len(partitions):
+            current_index = len(partitions) - 1
+
+        return f"--partition={partitions[current_index]}"
+
+    def _handle_sbatch_failure(self, run_id, meta, now, result):
+        """Handle sbatch failure with partition fallback logic."""
+        fallback_config = meta.get("partition_fallback")
+
+        if not fallback_config or not fallback_config.get("partitions"):
+            # No fallback configured - use existing behavior
+            self._record_restart(run_id, meta, now, reason="sbatch_failed")
+            return False
+
+        partitions = fallback_config.get("partitions", [])
+        retry_per_partition = fallback_config.get(
+            "retry_per_partition", constants.DEFAULT_RETRY_PER_PARTITION
+        )
+
+        current_index = meta.get("current_partition_index", 0)
+        failure_count = meta.get("partition_failure_count", 0) + 1
+
+        if failure_count >= retry_per_partition:
+            # Advance to next partition
+            next_index = current_index + 1
+            if next_index < len(partitions):
+                state.update_meta(
+                    run_id,
+                    {
+                        "current_partition_index": next_index,
+                        "partition_failure_count": 0,
+                        "last_partition_fallback_at": now,
+                    },
+                )
+                # Return True to signal immediate retry on new partition
+                return True
+            else:
+                # Exhausted all partitions - wrap around and apply backoff
+                state.update_meta(
+                    run_id,
+                    {
+                        "current_partition_index": 0,
+                        "partition_failure_count": 0,
+                        "last_preferred_attempt_at": now,
+                    },
+                )
+        else:
+            # Increment failure count, stay on current partition
+            state.update_meta(run_id, {"partition_failure_count": failure_count})
+
+        # Apply standard backoff
+        current_partition = partitions[current_index] if current_index < len(partitions) else "unknown"
+        self._record_restart(run_id, meta, now, reason=f"sbatch_failed_partition_{current_partition}")
+        return False
+
     def _submit_run(self, run_id, meta, now):
         script_path = meta.get("sbatch_script") or meta.get("sbatch_script_path") or meta.get("sbatch_path")
         if not script_path:
@@ -223,16 +388,38 @@ class ShepherdDaemon:
         extra_args = meta.get("sbatch_args") or []
         if isinstance(extra_args, str):
             extra_args = shlex.split(extra_args)
+        extra_args = list(extra_args)
+
+        # Auto-inject --gres=gpu:N if gpus specified and not already set
+        gpus = meta.get("gpus")
+        if gpus and not any(arg.startswith("--gres") for arg in extra_args):
+            extra_args.append(f"--gres=gpu:{gpus}")
+
+        # Handle partition fallback
+        partition_arg = self._get_partition_arg(meta, now)
+        if partition_arg:
+            # Remove any existing --partition from extra_args
+            extra_args = [arg for arg in extra_args if not arg.startswith("--partition")]
+            extra_args.append(partition_arg)
 
         bl_data = blacklist.load_blacklist()
         limit = meta.get("blacklist_limit", constants.DEFAULT_BLACKLIST_LIMIT)
         exclude_nodes = blacklist.exclude_list(bl_data, limit=limit)
         if exclude_nodes:
-            extra_args = list(extra_args) + [f"--exclude={','.join(exclude_nodes)}"]
+            extra_args = extra_args + [f"--exclude={','.join(exclude_nodes)}"]
 
-        result = slurm.sbatch(script_path, extra_args=extra_args)
+        # Auto-wrap script with shepherd wrapper
+        run_mode = meta.get("run_mode", "run_once")
+        wrapped_script = self._generate_wrapped_script(script_path, run_id, run_mode)
+
+        result = slurm.sbatch_script(wrapped_script, extra_args=extra_args)
         if not result["ok"]:
-            self._record_restart(run_id, meta, now, reason="sbatch_failed")
+            retry_now = self._handle_sbatch_failure(run_id, meta, now, result)
+            if retry_now:
+                # Reload meta and retry immediately with new partition
+                updated_meta = fs.read_json(fs.run_file(run_id, constants.META_FILENAME))
+                if updated_meta and not updated_meta.get("_corrupt"):
+                    self._submit_run(run_id, updated_meta, now)
             return
 
         job_id = _parse_sbatch_job_id(result["stdout"])
@@ -241,12 +428,66 @@ class ShepherdDaemon:
             "slurm_state": "PENDING",
             "slurm_reason": None,
             "last_submit_at": now,
+            "partition_failure_count": 0,  # Reset on success
         }
+        if partition_arg:
+            updates["current_partition"] = partition_arg.split("=")[1]
         if not meta.get("started_at"):
             updates["started_at"] = now
         restart_count = int(meta.get("restart_count", 0))
         updates["restart_count"] = restart_count
         state.update_meta(run_id, updates)
+
+    def _generate_wrapped_script(self, script_path, run_id, run_mode):
+        """Generate a wrapper script that includes shepherd.wrapper."""
+        import os
+        expanded_path = os.path.expanduser(script_path)
+
+        # Read original script
+        try:
+            with open(expanded_path, "r") as f:
+                original = f.read()
+        except Exception:
+            # Fallback to just running the script directly
+            return f"""#!/bin/bash
+python -m shepherd.wrapper --run-id {run_id} --run-mode {run_mode} -- bash {expanded_path}
+"""
+
+        # Extract #SBATCH directives and script body
+        lines = original.splitlines()
+        sbatch_lines = []
+        body_lines = []
+        in_header = True
+
+        for line in lines:
+            stripped = line.strip()
+            if in_header:
+                if stripped.startswith("#!"):
+                    sbatch_lines.append(line)
+                elif stripped.startswith("#SBATCH"):
+                    sbatch_lines.append(line)
+                elif stripped.startswith("#SHEPHERD"):
+                    # Skip #SHEPHERD directives - already processed
+                    continue
+                elif stripped.startswith("#") or stripped == "":
+                    sbatch_lines.append(line)
+                else:
+                    in_header = False
+                    body_lines.append(line)
+            else:
+                body_lines.append(line)
+
+        # Build wrapped script using heredoc for robustness with complex scripts
+        body = "\n".join(body_lines)
+        wrapped = "\n".join(sbatch_lines)
+        wrapped += f"""
+
+# Auto-wrapped by shepherd
+python -m shepherd.wrapper --run-id {run_id} --run-mode {run_mode} -- bash << '__SHEPHERD_SCRIPT_END__'
+{body}
+__SHEPHERD_SCRIPT_END__
+"""
+        return wrapped
 
     def _clear_terminal_state(self, run_id, meta):
         for filename in (constants.ENDED_FILENAME, constants.FINAL_FILENAME, constants.FAILURE_FILENAME):
@@ -288,6 +529,7 @@ def _apply_overrides(meta, control):
         "sbatch_args",
         "sbatch_script",
         "progress_stall_sec",
+        "partition_fallback",
     }
     merged = dict(meta)
     for key, value in overrides.items():

@@ -4,6 +4,7 @@ STATE_DIR = os.path.expanduser("~/.slurm_shepherd")
 RUNS_DIR = os.path.join(STATE_DIR, "runs")
 LOCKS_DIR = os.path.join(STATE_DIR, "locks")
 BLACKLIST_PATH = os.path.join(STATE_DIR, "blacklist.json")
+DAEMON_PID_PATH = os.path.join(STATE_DIR, "daemon.pid")
 
 META_FILENAME = "meta.json"
 CONTROL_FILENAME = "control.json"
@@ -24,10 +25,15 @@ DEFAULT_HEARTBEAT_GRACE_SEC = 90
 DEFAULT_HEARTBEAT_INTERVAL_SEC = 30
 DEFAULT_BLACKLIST_LIMIT = 64
 
+# Partition fallback defaults
+DEFAULT_RETRY_PER_PARTITION = 2
+DEFAULT_RESET_TO_PREFERRED_SEC = 3600
+
 
 def set_state_dir(path):
-    global STATE_DIR, RUNS_DIR, LOCKS_DIR, BLACKLIST_PATH
+    global STATE_DIR, RUNS_DIR, LOCKS_DIR, BLACKLIST_PATH, DAEMON_PID_PATH
     STATE_DIR = path
     RUNS_DIR = os.path.join(STATE_DIR, "runs")
     LOCKS_DIR = os.path.join(STATE_DIR, "locks")
     BLACKLIST_PATH = os.path.join(STATE_DIR, "blacklist.json")
+    DAEMON_PID_PATH = os.path.join(STATE_DIR, "daemon.pid")

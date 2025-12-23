@@ -37,3 +37,9 @@ def update_control(run_id, updates):
 def write_ended(run_id, payload):
     path = fs.run_file(run_id, constants.ENDED_FILENAME)
     fs.atomic_write_json(path, payload)
+
+
+def write_final(run_id):
+    import time
+    path = fs.run_file(run_id, constants.FINAL_FILENAME)
+    fs.atomic_write_json(path, {"timestamp": int(time.time())})
