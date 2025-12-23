@@ -1,6 +1,7 @@
 import os
 
-STATE_DIR = os.path.expanduser("~/.slurm_shepherd")
+# Allow override via environment variable for demos/testing
+STATE_DIR = os.path.expanduser(os.environ.get("SHEPHERD_STATE_DIR", "~/.slurm_shepherd"))
 RUNS_DIR = os.path.join(STATE_DIR, "runs")
 LOCKS_DIR = os.path.join(STATE_DIR, "locks")
 BLACKLIST_PATH = os.path.join(STATE_DIR, "blacklist.json")

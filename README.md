@@ -11,6 +11,8 @@
 
 [Features](#features) • [Installation](#install) • [Quick Start](#quick-start) • [Documentation](#how-it-works) • [Contributing](#tests)
 
+<img src="assets/demo.gif" alt="Shepherd TUI Demo" width="700">
+
 </div>
 
 ---
