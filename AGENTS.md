@@ -23,18 +23,90 @@ This system MUST operate entirely in user space, using Slurm CLI tools and share
 
 ## implementation status (current)
 
-Implemented in this repo:
+### Core Features (Complete)
 
-* compute-side wrapper with GPU visibility, CUDA smoke test, MIG count checks, trespasser detection, heartbeat, and failure/final markers
-* shepherd daemon with batched Slurm queries, heartbeat/progress stall handling, restart + backoff, and blacklist TTL/exclude logic
-* CLI commands: list/status/control (pause/unpause/stop/restart/start/blacklist/config-set) plus daemon/tui entrypoints
-* TUI dashboard/detail/logs/blacklist screens with required keybindings (including log search)
-* unit tests for heartbeat, blacklist TTL, backoff, state parsing, and daemon control flow (mocked Slurm)
+* **Compute-side wrapper** (`shepherd/wrapper.py`)
+  * GPU visibility probe (`nvidia-smi -L`)
+  * CUDA smoke test (torch/cupy/numba)
+  * MIG count validation
+  * Trespasser detection
+  * Heartbeat thread
+  * Failure/final markers with exit codes (42/43/44/50)
 
-Pending or partial:
+* **Shepherd daemon** (`shepherd/daemon.py`)
+  * Batched Slurm queries (`squeue`, `sacct`)
+  * Heartbeat stall detection
+  * Progress stall detection
+  * Automatic restart with exponential backoff
+  * Node blacklisting with TTL
+  * Partition fallback (automatic failover across queues)
+  * Auto-wrapping of scripts with heredoc for complex multiline scripts
 
-* full JSON schema validation for `meta.json` (not enforced yet)
-* integration-style tests for probe failures, crash loops, and expiry windows
+* **CLI** (`shepherd/cli.py`)
+  * `shepherd <script>` — submit new run (auto-discovers GPU partitions)
+  * `shepherd list` — list all runs
+  * `shepherd status --run-id X` — detailed status
+  * `shepherd control <op> --run-id X` — pause/unpause/stop/restart/start
+  * `shepherd nodes` — interactive node management TUI
+  * `shepherd nodes ban/unban` — blacklist management
+  * `shepherd tui` — main monitoring TUI
+  * `shepherd sync` — sync code to remote
+  * `--remote HOST` — execute on remote cluster via SSH
+  * `--json` — machine-readable output for all commands
+
+* **Modern TUI** (`shepherd/tui.py`)
+  * 256-color scheme with 8-color fallback
+  * Split-pane layout (runs list + detail/script/logs)
+  * Vim-style navigation (j/k, g/G, Ctrl+u/d)
+  * Status icons (●, ◐, ○, ↻, ✗, ✓, ■)
+  * Scroll indicators
+  * Real-time log tailing
+  * Syntax highlighting (#SBATCH green, #SHEPHERD purple)
+
+* **Nodes TUI** (`shepherd/cli.py:_interactive_nodes`)
+  * List all nodes with GPU info
+  * Show blacklist status and reasons
+  * Interactive ban/unban with TTL
+  * TTY detection with text fallback
+
+* **GPU Partition Discovery** (`shepherd/slurm.py`)
+  * Auto-discover partitions via `sinfo`
+  * Filter by GPU count, min/max VRAM
+  * Preference modes: `max` (best first) or `min` (cheapest first)
+  * Known GPU VRAM database (A100, H100, V100, L40, etc.)
+
+* **#SHEPHERD Directives** (`shepherd/slurm.py:parse_shepherd_directives`)
+  * `--gpus N` — minimum GPUs
+  * `--min-vram N` / `--max-vram N` — VRAM filtering
+  * `--prefer min|max` — partition ordering
+  * `--mode run_once|indefinite` — run mode
+  * `--partitions a,b,c` — explicit partition list
+  * `--max-retries N`, `--keep-alive N`, `--backoff-*`, etc.
+
+* **Remote Execution** (`shepherd/cli.py`)
+  * `--remote HOST` for all commands
+  * Auto-sync code on changes (MD5 hash comparison)
+  * TTY forwarding for interactive TUI
+  * Remote daemon auto-start
+
+* **Partition Fallback** (`shepherd/daemon.py`)
+  * Automatic failover after N failures per partition
+  * Periodic retry of preferred partition
+  * Immediate retry on partition switch
+  * Configurable via `partition_fallback` in meta.json
+
+* **Unit Tests** (`tests/`)
+  * `test_backoff.py` — exponential backoff logic
+  * `test_blacklist.py` — node blacklist add/remove/TTL
+  * `test_heartbeat.py` — heartbeat read/stale detection
+  * `test_state.py` — state file parsing, corrupt file handling
+  * `test_daemon.py` — partition fallback, heartbeat cancellation, restart logic
+
+### Pending / Partial
+
+* Full JSON schema validation for `meta.json` (not enforced)
+* Integration tests for probe failures, crash loops, expiry windows
+* Multi-node job support (currently single-node only)
 
 ---
 
