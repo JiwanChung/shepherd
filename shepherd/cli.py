@@ -383,6 +383,29 @@ def cmd_new(args):
 
     script = args.script
 
+    # Handle remote execution early - let remote host do partition discovery
+    if getattr(args, "remote", None):
+        # Build remote args, passing through GPU/partition options
+        # Remote host will do the partition discovery
+        remote_args = ["new", script]
+        if args.run_id:
+            remote_args.extend(["--run-id", args.run_id])
+        if args.mode:
+            remote_args.extend(["--mode", args.mode])
+        if args.gpus:
+            remote_args.extend(["--gpus", str(args.gpus)])
+        if args.min_vram:
+            remote_args.extend(["--min-vram", str(args.min_vram)])
+        if args.max_vram:
+            remote_args.extend(["--max-vram", str(args.max_vram)])
+        if args.prefer:
+            remote_args.extend(["--prefer", args.prefer])
+        if args.partitions:
+            remote_args.extend(["--partitions", args.partitions])
+        if args.no_auto_partitions:
+            remote_args.append("--no-auto-partitions")
+        return _run_remote(args, remote_args)
+
     # Parse #SHEPHERD directives from script (CLI args override)
     directives = slurm.parse_shepherd_directives(script)
 
@@ -419,21 +442,6 @@ def cmd_new(args):
             prefer=prefer,
         )
 
-    if getattr(args, "remote", None):
-        remote_args = ["new", script, "--run-id", run_id, "--mode", mode]
-        if gpus:
-            remote_args.extend(["--gpus", str(gpus)])
-        if min_vram:
-            remote_args.extend(["--min-vram", str(min_vram)])
-        if max_vram:
-            remote_args.extend(["--max-vram", str(max_vram)])
-        if prefer:
-            remote_args.extend(["--prefer", prefer])
-        if partitions_str:
-            remote_args.extend(["--partitions", partitions_str])
-        if args.no_auto_partitions:
-            remote_args.append("--no-auto-partitions")
-        return _run_remote(args, remote_args)
     fs.ensure_dirs()
 
     run_dir = os.path.join(constants.RUNS_DIR, run_id)
