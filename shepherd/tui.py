@@ -555,8 +555,14 @@ class TUIApp:
         self.stdscr.addstr(1, 2, subtitle[:width - 4])
         self.stdscr.attroff(self.COL_DIM)
 
-        # Column header
-        col_hdr = f"{'RUN':<24}{'JOB':<10}{'HB':<6}{'STATUS'}"
+        # Column header (responsive to width)
+        content_w = width - 4
+        if content_w >= 50:
+            col_hdr = f"{'RUN':<22} {'JOB':<8} {'HB':<5} {'STATUS'}"
+        elif content_w >= 35:
+            col_hdr = f"{'RUN':<20} {'JOB':<8} {'STATUS'}"
+        else:
+            col_hdr = f"{'RUN':<{content_w - 10}} {'STATUS'}"
         self.stdscr.attron(self.COL_DIM)
         self.stdscr.addstr(3, 2, col_hdr[:width - 4])
         self.stdscr.attroff(self.COL_DIM)
@@ -591,22 +597,50 @@ class TUIApp:
 
                 prefix = "▸ " if is_selected else "  "
 
+                # Calculate available width for content (leave room for scroll indicator)
+                content_width = width - 2
+
+                # Adjust column widths based on available space
+                name_w = min(22, content_width - 20)
+                job_w = min(8, max(0, content_width - name_w - 12))
+                hb_w = min(5, max(0, content_width - name_w - job_w - 8))
+
+                run_id_disp = run_id[:name_w]
+                job_id_disp = job_id[:job_w] if job_w > 0 else ""
+                hb_disp = hb[:hb_w] if hb_w > 0 else ""
+
                 if is_selected:
                     self.stdscr.attron(self.COL_SEL | curses.A_BOLD)
-                    line = f"{prefix}{run_id:<24}{job_id:<10}{hb:<6}{icon} {status_text}"
+                    line = f"{prefix}{run_id_disp:<{name_w}}"
+                    if job_w > 0:
+                        line += f" {job_id_disp:<{job_w}}"
+                    if hb_w > 0:
+                        line += f" {hb_disp:<{hb_w}}"
+                    line += f" {icon} {status_text}"
                     self.stdscr.addstr(y, 0, " " * width)
-                    self.stdscr.addstr(y, 0, line[:width - 1])
+                    self.stdscr.addstr(y, 0, line[:width - 2])
                     self.stdscr.attroff(self.COL_SEL | curses.A_BOLD)
                 else:
-                    self.stdscr.addstr(y, 0, prefix)
-                    self.stdscr.addstr(run_id.ljust(24))
-                    self.stdscr.attron(self.COL_DIM)
-                    self.stdscr.addstr(job_id.ljust(10))
-                    self.stdscr.addstr(hb.ljust(6))
-                    self.stdscr.attroff(self.COL_DIM)
-                    self.stdscr.attron(status_col)
-                    self.stdscr.addstr(f"{icon} {status_text}"[:15])
-                    self.stdscr.attroff(status_col)
+                    x = 0
+                    self.stdscr.addstr(y, x, prefix)
+                    x += len(prefix)
+                    self.stdscr.addstr(y, x, run_id_disp.ljust(name_w)[:width - x - 2])
+                    x += name_w
+                    if job_w > 0 and x < width - 2:
+                        self.stdscr.attron(self.COL_DIM)
+                        self.stdscr.addstr(y, x, (" " + job_id_disp.ljust(job_w))[:width - x - 2])
+                        x += job_w + 1
+                        self.stdscr.attroff(self.COL_DIM)
+                    if hb_w > 0 and x < width - 2:
+                        self.stdscr.attron(self.COL_DIM)
+                        self.stdscr.addstr(y, x, (" " + hb_disp.ljust(hb_w))[:width - x - 2])
+                        x += hb_w + 1
+                        self.stdscr.attroff(self.COL_DIM)
+                    if x < width - 2:
+                        status_str = f" {icon} {status_text}"
+                        self.stdscr.attron(status_col)
+                        self.stdscr.addstr(y, x, status_str[:width - x - 2])
+                        self.stdscr.attroff(status_col)
 
             # Scroll indicator
             total = len(self.runs)
