@@ -214,6 +214,14 @@ suma_rtx4090             rtx4090        24GB   6    ◐ 4    2/11      66/66
 
 Availability icons: `○` (green, full) `◐` (yellow, partial) `●` (red, none)
 
+Use `shepherd gpus -i` for an interactive TUI with auto-refresh (every 5s):
+
+| Key | Action |
+|-----|--------|
+| `↑/↓` or `j/k` | Navigate partitions |
+| `r` | Force refresh |
+| `q` | Quit |
+
 ### Status Icons
 
 | Icon | Status |
@@ -352,6 +360,7 @@ shepherd nodes unban --node node001
 
 # GPU availability per partition
 shepherd gpus                                          # show max assignable GPUs per partition
+shepherd gpus -i                                       # interactive TUI with auto-refresh
 
 # View logs
 shepherd logs --run-id my-job                          # stdout (last 50 lines)
