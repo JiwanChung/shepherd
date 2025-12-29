@@ -193,6 +193,27 @@ Smoke test results:
 | `⊘` | QOS/partition error |
 | `⏱` | Timeout |
 
+### GPU Availability
+
+The `shepherd gpus` command shows max assignable GPUs per partition:
+
+```
+Partition                GPU            VRAM    Max   Avail  Nodes      Total
+─────────────────────────────────────────────────────────────────────────────────────
+suma_a100                a100           80GB   8    ○ 8    0/3       24/24
+gigabyte_A6000           a6000          48GB   8    ○ 8    3/6       48/48
+suma_rtx4090             rtx4090        24GB   6    ◐ 4    2/11      66/66
+```
+
+| Column | Description |
+|--------|-------------|
+| Max | Maximum GPUs on a single node |
+| Avail | Max available on any single node now |
+| Nodes | Nodes with free GPUs / total nodes |
+| Total | Cluster-wide available / total GPUs |
+
+Availability icons: `○` (green, full) `◐` (yellow, partial) `●` (red, none)
+
 ### Status Icons
 
 | Icon | Status |
@@ -328,6 +349,9 @@ shepherd nodes                                         # interactive TUI (press 
 shepherd nodes --list                                  # list all nodes
 shepherd nodes ban --node node001 --ttl 3600 --reason "Bad GPU"
 shepherd nodes unban --node node001
+
+# GPU availability per partition
+shepherd gpus                                          # show max assignable GPUs per partition
 
 # View logs
 shepherd logs --run-id my-job                          # stdout (last 50 lines)
