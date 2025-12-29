@@ -1431,12 +1431,14 @@ def _get_gpu_summary():
 
         entry = partitions[partition]
         entry["max_count"] = max(entry["max_count"], gpu_count)
-        entry["max_available"] = max(entry["max_available"], gpus_available)
         entry["nodes_total"] += 1
         entry["total_gpus"] += gpu_count
-        entry["total_available"] += gpus_available
-        if gpus_available > 0 and state in ("idle", "mixed"):
-            entry["nodes_with_free"] += 1
+        # Only count available GPUs from nodes that can actually be used
+        if state in ("idle", "mixed"):
+            entry["max_available"] = max(entry["max_available"], gpus_available)
+            entry["total_available"] += gpus_available
+            if gpus_available > 0:
+                entry["nodes_with_free"] += 1
         # Update gpu_type if not set
         if not entry["gpu_type"] and gpu_type:
             entry["gpu_type"] = gpu_type
