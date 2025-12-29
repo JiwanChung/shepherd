@@ -1478,43 +1478,52 @@ class _C:
 
 
 def _interactive_gpus():
-    """Interactive TUI for GPU availability."""
+    """Interactive TUI for GPU availability - matches nodes TUI style."""
     import curses
+    import sys
 
-    def main(stdscr):
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        # Fallback to non-interactive
+        gpu_summary = _get_gpu_summary()
+        for entry in gpu_summary:
+            print(f"{entry['partition']}: {entry['max_available']}/{entry['max_count']} GPUs available")
+        return 0
+
+    def run_tui(stdscr):
         curses.curs_set(0)
         curses.use_default_colors()
-        curses.start_color()
-        curses.init_pair(1, curses.COLOR_GREEN, -1)
-        curses.init_pair(2, curses.COLOR_YELLOW, -1)
-        curses.init_pair(3, curses.COLOR_RED, -1)
-        curses.init_pair(4, curses.COLOR_CYAN, -1)
-        curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
 
-        COL_OK = curses.color_pair(1)
-        COL_WARN = curses.color_pair(2)
-        COL_ERR = curses.color_pair(3)
-        COL_CYAN = curses.color_pair(4)
-        COL_BAR = curses.color_pair(5)
-        COL_DIM = curses.A_DIM
+        # Modern color scheme (same as nodes TUI)
+        curses.init_pair(1, 16, 255)   # Selected: dark on light
+        curses.init_pair(2, 203, -1)   # Error/full: soft red
+        curses.init_pair(3, 114, -1)   # OK/available: soft green
+        curses.init_pair(4, 220, -1)   # Warn/partial: soft yellow
+        curses.init_pair(5, 75, -1)    # Header: soft blue
+        curses.init_pair(6, 245, -1)   # Dim: gray
+        curses.init_pair(7, 255, 237)  # Status bar: light on dark
+
+        # Fallback for terminals without 256 colors
+        if curses.COLORS < 256:
+            curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
+            curses.init_pair(2, curses.COLOR_RED, -1)
+            curses.init_pair(3, curses.COLOR_GREEN, -1)
+            curses.init_pair(4, curses.COLOR_YELLOW, -1)
+            curses.init_pair(5, curses.COLOR_CYAN, -1)
+            curses.init_pair(6, curses.COLOR_WHITE, -1)
+            curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_WHITE)
+
+        COL_SEL = curses.color_pair(1)
+        COL_ERR = curses.color_pair(2)
+        COL_OK = curses.color_pair(3)
+        COL_WARN = curses.color_pair(4)
+        COL_HEAD = curses.color_pair(5)
+        COL_DIM = curses.color_pair(6)
+        COL_BAR = curses.color_pair(7)
 
         selected = 0
-        refresh_interval = 5  # seconds
+        scroll_offset = 0
+        refresh_interval = 5
         last_refresh = 0
-
-        def safe_addstr(y, x, text, attr=0):
-            """Safely add string, avoiding curses boundary errors."""
-            height, width = stdscr.getmaxyx()
-            if y < 0 or y >= height or x < 0:
-                return x
-            max_len = width - x - 1
-            if max_len <= 0:
-                return x
-            try:
-                stdscr.addstr(y, x, text[:max_len], attr)
-            except curses.error:
-                pass
-            return x + len(text[:max_len])
 
         while True:
             now = time.time()
@@ -1524,104 +1533,158 @@ def _interactive_gpus():
 
             stdscr.erase()
             height, width = stdscr.getmaxyx()
-            max_x = width - 1
+            max_width = min(width, 100)
 
-            # Header bar
-            title = " GPU AVAILABILITY "
-            header_line = " " * width
+            total = len(gpu_summary)
+            total_avail = sum(e["total_available"] for e in gpu_summary)
+            total_gpus = sum(e["total_gpus"] for e in gpu_summary)
+
+            # ═══ Header ═══
+            title = " GPUS "
+            header_line = "─" * max_width
+            mid = (max_width - len(title)) // 2
+            header_line = header_line[:mid] + title + header_line[mid + len(title):]
             try:
-                stdscr.addstr(0, 0, header_line[:max_x], COL_BAR | curses.A_BOLD)
-                title_x = (width - len(title)) // 2
-                stdscr.addstr(0, title_x, title, COL_BAR | curses.A_BOLD)
+                stdscr.attron(COL_HEAD | curses.A_BOLD)
+                stdscr.addstr(0, 0, header_line[:max_width-1])
+                stdscr.attroff(COL_HEAD | curses.A_BOLD)
             except curses.error:
                 pass
 
-            # Column headers
-            header = f"  {'Partition':<22} {'GPU':<12} {'VRAM':<6} {'Max':<5} {'Avail':<7} {'Nodes':<9} {'Total'}"
-            safe_addstr(2, 0, header[:max_x], curses.A_BOLD)
-            safe_addstr(3, 0, "-" * min(85, max_x), COL_DIM)
+            # Subtitle with counts
+            subtitle = f"{total} partitions · {total_avail}/{total_gpus} GPUs available"
+            try:
+                stdscr.attron(COL_DIM)
+                stdscr.addstr(1, 2, subtitle[:max_width-4])
+                stdscr.attroff(COL_DIM)
+            except curses.error:
+                pass
 
-            # List partitions
-            list_start = 4
-            list_height = height - 6
+            # ═══ Column Headers ═══
+            col_header = f"{'PARTITION':<22}{'GPU':<12}{'VRAM':<7}{'MAX':<5}{'AVAIL':<8}{'NODES':<10}{'TOTAL'}"
+            try:
+                stdscr.attron(COL_DIM)
+                stdscr.addstr(3, 2, col_header[:max_width-4])
+                stdscr.attroff(COL_DIM)
+            except curses.error:
+                pass
+
+            # ═══ Partition List ═══
+            list_start = 5
+            list_height = height - 9
             if list_height < 1:
                 list_height = 1
-            total = len(gpu_summary)
 
-            # Scroll offset
-            if total > list_height:
-                if selected >= list_height:
-                    offset = min(selected - list_height + 1, total - list_height)
-                else:
-                    offset = 0
-            else:
-                offset = 0
-
-            for i, entry in enumerate(gpu_summary[offset:offset + list_height]):
-                idx = offset + i
-                y = list_start + i
-                if y >= height - 2:
-                    break
-
-                partition = entry["partition"][:20]
-                gpu_type = entry["gpu_type"][:10]
-                vram = f"{entry['vram_gb']}GB" if entry["vram_gb"] else "?"
-                max_count = entry["max_count"]
-                max_avail = entry["max_available"]
-                nodes_free = entry["nodes_with_free"]
-                nodes_total = entry["nodes_total"]
-                total_gpus = entry["total_gpus"]
-                total_avail = entry["total_available"]
-
-                # Availability color and icon
-                if max_avail == 0:
-                    avail_col = COL_ERR
-                    icon = "x"
-                elif max_avail == max_count:
-                    avail_col = COL_OK
-                    icon = "o"
-                else:
-                    avail_col = COL_WARN
-                    icon = "~"
-
-                is_selected = (idx == selected)
-                prefix = "> " if is_selected else "  "
-
-                if is_selected:
-                    # Selected row - highlight entire line
-                    line = f"{prefix}{partition:<22} {gpu_type:<12} {vram:<6} {max_count:<5} {icon} {max_avail:<5} {nodes_free}/{nodes_total:<6} {total_avail}/{total_gpus}"
-                    try:
-                        stdscr.addstr(y, 0, " " * max_x, COL_BAR | curses.A_BOLD)
-                        stdscr.addstr(y, 0, line[:max_x], COL_BAR | curses.A_BOLD)
-                    except curses.error:
-                        pass
-                else:
-                    # Normal row with colors
-                    x = 0
-                    x = safe_addstr(y, x, prefix)
-                    x = safe_addstr(y, x, f"{partition:<22} ", COL_CYAN)
-                    x = safe_addstr(y, x, f"{gpu_type:<12} ", COL_DIM)
-                    x = safe_addstr(y, x, f"{vram:<6} {max_count:<5} ")
-                    x = safe_addstr(y, x, f"{icon} {max_avail:<5} ", avail_col)
-                    x = safe_addstr(y, x, f"{nodes_free}/{nodes_total:<6} ")
-                    x = safe_addstr(y, x, f"{total_avail}/{total_gpus}", COL_DIM)
-
-            # Footer
-            help_y = height - 1
-            if help_y > 0:
-                keys = [("j/k", "navigate"), ("r", "refresh"), ("q", "quit")]
+            if not gpu_summary:
+                empty_msg = "No GPU partitions found"
                 try:
-                    stdscr.addstr(help_y, 0, " " * max_x, COL_BAR)
-                    x = 1
-                    for key, desc in keys:
-                        if x + len(key) + len(desc) + 3 >= max_x:
-                            break
-                        stdscr.addstr(help_y, x, key, COL_BAR | curses.A_BOLD)
-                        x += len(key)
-                        stdscr.addstr(help_y, x, f" {desc}  ", COL_BAR)
-                        x += len(desc) + 3
+                    stdscr.attron(COL_DIM)
+                    stdscr.addstr(list_start + 2, (max_width - len(empty_msg)) // 2, empty_msg)
+                    stdscr.attroff(COL_DIM)
                 except curses.error:
                     pass
+            else:
+                # Adjust scroll
+                if selected < scroll_offset:
+                    scroll_offset = selected
+                elif selected >= scroll_offset + list_height:
+                    scroll_offset = selected - list_height + 1
+
+                visible = gpu_summary[scroll_offset:scroll_offset + list_height]
+
+                for i, entry in enumerate(visible):
+                    idx = scroll_offset + i
+                    y = list_start + i
+                    if y >= height - 4:
+                        break
+
+                    partition = entry["partition"][:20]
+                    gpu_type = (entry["gpu_type"] or "—")[:10]
+                    vram = f"{entry['vram_gb']}GB" if entry["vram_gb"] else "—"
+                    max_count = entry["max_count"]
+                    max_avail = entry["max_available"]
+                    nodes_free = entry["nodes_with_free"]
+                    nodes_total = entry["nodes_total"]
+                    part_total_gpus = entry["total_gpus"]
+                    part_total_avail = entry["total_available"]
+
+                    # Availability icon and color
+                    if max_avail == 0:
+                        icon = "●"
+                        avail_col = COL_ERR
+                    elif max_avail == max_count:
+                        icon = "○"
+                        avail_col = COL_OK
+                    else:
+                        icon = "◐"
+                        avail_col = COL_WARN
+
+                    is_selected = (idx == selected)
+                    prefix = "▸ " if is_selected else "  "
+
+                    nodes_info = f"{nodes_free}/{nodes_total}"
+                    total_info = f"{part_total_avail}/{part_total_gpus}"
+
+                    try:
+                        if is_selected:
+                            stdscr.attron(COL_SEL | curses.A_BOLD)
+                            line = f"{prefix}{partition:<22}{gpu_type:<12}{vram:<7}{max_count:<5}{icon} {max_avail:<6}{nodes_info:<10}{total_info}"
+                            stdscr.addstr(y, 0, " " * max_width)
+                            stdscr.addstr(y, 0, line[:max_width-1])
+                            stdscr.attroff(COL_SEL | curses.A_BOLD)
+                        else:
+                            stdscr.addstr(y, 0, prefix)
+                            stdscr.attron(COL_HEAD)
+                            stdscr.addstr(f"{partition:<22}")
+                            stdscr.attroff(COL_HEAD)
+                            stdscr.attron(COL_DIM)
+                            stdscr.addstr(f"{gpu_type:<12}")
+                            stdscr.attroff(COL_DIM)
+                            stdscr.addstr(f"{vram:<7}{max_count:<5}")
+                            stdscr.attron(avail_col)
+                            stdscr.addstr(f"{icon} {max_avail:<6}")
+                            stdscr.attroff(avail_col)
+                            stdscr.addstr(f"{nodes_info:<10}")
+                            stdscr.attron(COL_DIM)
+                            stdscr.addstr(f"{total_info}")
+                            stdscr.attroff(COL_DIM)
+                    except curses.error:
+                        pass
+
+                # Scroll indicator
+                if total > list_height:
+                    scroll_y = list_start
+                    scroll_h = list_height
+                    thumb_h = max(1, scroll_h * list_height // total)
+                    thumb_y = scroll_y + (scroll_offset * (scroll_h - thumb_h) // max(1, total - list_height))
+                    for sy in range(scroll_y, scroll_y + scroll_h):
+                        char = "█" if thumb_y <= sy < thumb_y + thumb_h else "░"
+                        try:
+                            stdscr.addstr(sy, max_width - 1, char, COL_DIM)
+                        except curses.error:
+                            pass
+
+            # ═══ Help Bar ═══
+            help_y = height - 2
+            keys = [("↑↓", "navigate"), ("r", "refresh"), ("q", "quit")]
+
+            try:
+                stdscr.attron(COL_BAR)
+                stdscr.addstr(help_y, 0, " " * max_width)
+                x = 1
+                for key, desc in keys:
+                    if x + len(key) + len(desc) + 4 > max_width:
+                        break
+                    stdscr.addstr(help_y, x, f" {key} ")
+                    stdscr.attroff(COL_BAR)
+                    stdscr.attron(COL_DIM)
+                    stdscr.addstr(f"{desc}  ")
+                    stdscr.attroff(COL_DIM)
+                    stdscr.attron(COL_BAR)
+                    x += len(key) + len(desc) + 5
+                stdscr.attroff(COL_BAR)
+            except curses.error:
+                pass
 
             stdscr.refresh()
 
@@ -1637,7 +1700,7 @@ def _interactive_gpus():
             elif key in (ord('q'), ord('Q'), 27):
                 break
             elif key in (ord('r'), ord('R')):
-                last_refresh = 0  # Force refresh
+                last_refresh = 0
             elif key == curses.KEY_UP or key == ord('k'):
                 if selected > 0:
                     selected -= 1
@@ -1645,7 +1708,7 @@ def _interactive_gpus():
                 if selected < total - 1:
                     selected += 1
 
-    curses.wrapper(main)
+    curses.wrapper(run_tui)
     return 0
 
 
