@@ -1399,6 +1399,94 @@ def cmd_logs(args):
     return 0
 
 
+def _get_gpu_summary():
+    """Aggregate GPU info by type, finding max per single node."""
+    from shepherd import slurm
+    nodes = slurm.list_nodes()
+
+    # Aggregate by GPU type
+    gpu_types = {}  # gpu_type -> {max_count, max_available, vram, partitions, nodes_total, nodes_available}
+    for node in nodes:
+        gpu_type = node.get("gpu_type")
+        if not gpu_type:
+            continue
+
+        gpu_count = node.get("gpu_count", 0)
+        gpus_available = node.get("gpus_available", 0)
+        vram = node.get("vram_gb", 0)
+        partition = node.get("partition", "")
+        state = node.get("state", "")
+
+        if gpu_type not in gpu_types:
+            gpu_types[gpu_type] = {
+                "max_count": 0,
+                "max_available": 0,
+                "vram_gb": vram,
+                "partitions": set(),
+                "nodes_total": 0,
+                "nodes_with_free": 0,
+            }
+
+        entry = gpu_types[gpu_type]
+        entry["max_count"] = max(entry["max_count"], gpu_count)
+        entry["max_available"] = max(entry["max_available"], gpus_available)
+        entry["nodes_total"] += 1
+        if gpus_available > 0 and state in ("idle", "mixed"):
+            entry["nodes_with_free"] += 1
+        if partition:
+            entry["partitions"].add(partition)
+
+    # Convert to list and sort by VRAM (highest first)
+    result = []
+    for gpu_type, info in gpu_types.items():
+        result.append({
+            "gpu_type": gpu_type,
+            "max_count": info["max_count"],
+            "max_available": info["max_available"],
+            "vram_gb": info["vram_gb"],
+            "partitions": sorted(info["partitions"]),
+            "nodes_total": info["nodes_total"],
+            "nodes_with_free": info["nodes_with_free"],
+        })
+
+    result.sort(key=lambda x: (-x["vram_gb"], -x["max_count"], x["gpu_type"]))
+    return result
+
+
+def cmd_gpus(args):
+    """Show max assignable GPUs per GPU type."""
+    if getattr(args, "remote", None):
+        return _run_remote(args, ["gpus"])
+
+    gpu_summary = _get_gpu_summary()
+
+    if args.json:
+        _print_json({"gpus": gpu_summary})
+        return 0
+
+    if not gpu_summary:
+        print("No GPU nodes found")
+        return 0
+
+    # Print table
+    print(f"{'GPU Type':<16} {'VRAM':<8} {'Max/Node':<10} {'Available':<10} {'Nodes':<12} Partitions")
+    print("─" * 80)
+
+    for entry in gpu_summary:
+        gpu_type = entry["gpu_type"]
+        vram = f"{entry['vram_gb']}GB" if entry["vram_gb"] else "?"
+        max_count = entry["max_count"]
+        max_avail = entry["max_available"]
+        nodes_info = f"{entry['nodes_with_free']}/{entry['nodes_total']}"
+        partitions = ", ".join(entry["partitions"][:3])
+        if len(entry["partitions"]) > 3:
+            partitions += f" +{len(entry['partitions']) - 3}"
+
+        print(f"{gpu_type:<16} {vram:<8} {max_count:<10} {max_avail:<10} {nodes_info:<12} {partitions}")
+
+    return 0
+
+
 def _emit_ok(args):
     if args.json:
         _print_json({"ok": True})
@@ -1493,6 +1581,9 @@ def build_parser():
     logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of lines to show (default: 50, 0 for all)")
     logs_parser.set_defaults(func=cmd_logs)
 
+    gpus_parser = subparsers.add_parser("gpus", help="Show max assignable GPUs per GPU type")
+    gpus_parser.set_defaults(func=cmd_gpus)
+
     return parser
 
 
@@ -1500,7 +1591,7 @@ def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
 
-    subcommands = {"list", "status", "control", "daemon", "daemon-status", "sync", "tui", "new", "nodes", "config", "logs"}
+    subcommands = {"list", "status", "control", "daemon", "daemon-status", "sync", "tui", "new", "nodes", "config", "logs", "gpus"}
     global_flags_with_value = {"--remote", "--remote-python", "--remote-dir"}
     global_flags_no_value = {"--json", "--no-daemon", "--no-sync"}
 
