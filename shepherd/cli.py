@@ -1481,6 +1481,19 @@ def _interactive_gpus():
     """Interactive TUI for GPU availability."""
     import curses
 
+    def safe_addstr(stdscr, y, x, text, attr=0):
+        """Safely add string, avoiding curses boundary errors."""
+        height, width = stdscr.getmaxyx()
+        if y < 0 or y >= height or x < 0 or x >= width:
+            return
+        max_len = width - x - 1
+        if max_len <= 0:
+            return
+        try:
+            stdscr.addstr(y, x, text[:max_len], attr)
+        except curses.error:
+            pass
+
     def main(stdscr):
         curses.curs_set(0)
         curses.use_default_colors()
@@ -1510,20 +1523,21 @@ def _interactive_gpus():
 
             stdscr.erase()
             height, width = stdscr.getmaxyx()
+            max_x = width - 1
 
             # Header
             title = " GPU AVAILABILITY "
             stdscr.attron(COL_BAR | curses.A_BOLD)
-            stdscr.addstr(0, 0, " " * width)
-            stdscr.addstr(0, (width - len(title)) // 2, title)
+            safe_addstr(stdscr, 0, 0, " " * max_x)
+            safe_addstr(stdscr, 0, max(0, (width - len(title)) // 2), title)
             stdscr.attroff(COL_BAR | curses.A_BOLD)
 
             # Column headers
             header = f"  {'Partition':<22} {'GPU':<12} {'VRAM':<6} {'Max':<5} {'Avail':<7} {'Nodes':<9} {'Total'}"
             stdscr.attron(curses.A_BOLD)
-            stdscr.addstr(2, 0, header[:width-1])
+            safe_addstr(stdscr, 2, 0, header)
             stdscr.attroff(curses.A_BOLD)
-            stdscr.addstr(3, 0, "─" * min(85, width-1))
+            safe_addstr(stdscr, 3, 0, "─" * min(85, max_x))
 
             # List partitions
             list_start = 4
@@ -1567,43 +1581,31 @@ def _interactive_gpus():
                     icon = "◐"
 
                 is_selected = (idx == selected)
-                prefix = "▸ " if is_selected else "  "
+                prefix = "> " if is_selected else "  "
+
+                line = f"{prefix}{partition:<22} {gpu_type:<12} {vram:<6} {max_count:<5} {icon} {max_avail:<5} {nodes_free}/{nodes_total:<6} {total_avail}/{total_gpus}"
 
                 if is_selected:
                     stdscr.attron(COL_BAR | curses.A_BOLD)
-                    line = f"{prefix}{partition:<22} {gpu_type:<12} {vram:<6} {max_count:<5} {icon} {max_avail:<5} {nodes_free}/{nodes_total:<6} {total_avail}/{total_gpus}"
-                    stdscr.addstr(y, 0, " " * (width - 1))
-                    stdscr.addstr(y, 0, line[:width-1])
+                    safe_addstr(stdscr, y, 0, " " * max_x)
+                    safe_addstr(stdscr, y, 0, line)
                     stdscr.attroff(COL_BAR | curses.A_BOLD)
                 else:
-                    stdscr.addstr(y, 0, prefix)
-                    stdscr.attron(COL_CYAN)
-                    stdscr.addstr(f"{partition:<22} ")
-                    stdscr.attroff(COL_CYAN)
-                    stdscr.attron(COL_DIM)
-                    stdscr.addstr(f"{gpu_type:<12} ")
-                    stdscr.attroff(COL_DIM)
-                    stdscr.addstr(f"{vram:<6} {max_count:<5} ")
-                    stdscr.attron(avail_col)
-                    stdscr.addstr(f"{icon} {max_avail:<5} ")
-                    stdscr.attroff(avail_col)
-                    stdscr.addstr(f"{nodes_free}/{nodes_total:<6} ")
-                    stdscr.attron(COL_DIM)
-                    stdscr.addstr(f"{total_avail}/{total_gpus}")
-                    stdscr.attroff(COL_DIM)
+                    safe_addstr(stdscr, y, 0, line)
 
             # Footer
             help_y = height - 1
-            keys = [("↑↓", "navigate"), ("r", "refresh"), ("q", "quit")]
+            keys = [("j/k", "navigate"), ("r", "refresh"), ("q", "quit")]
             stdscr.attron(COL_BAR)
-            stdscr.addstr(help_y, 0, " " * width)
+            safe_addstr(stdscr, help_y, 0, " " * max_x)
             x = 1
             for key, desc in keys:
-                if x + len(key) + len(desc) + 3 >= width:
+                if x + len(key) + len(desc) + 3 >= max_x:
                     break
-                stdscr.addstr(help_y, x, key, curses.A_BOLD)
-                stdscr.addstr(f" {desc}  ")
-                x += len(key) + len(desc) + 3
+                safe_addstr(stdscr, help_y, x, key, COL_BAR | curses.A_BOLD)
+                x += len(key)
+                safe_addstr(stdscr, help_y, x, f" {desc}  ", COL_BAR)
+                x += len(desc) + 3
             stdscr.attroff(COL_BAR)
 
             stdscr.refresh()
