@@ -1477,10 +1477,170 @@ class _C:
     CYAN = "\033[36m"
 
 
+def _interactive_gpus():
+    """Interactive TUI for GPU availability."""
+    import curses
+
+    def main(stdscr):
+        curses.curs_set(0)
+        curses.use_default_colors()
+        curses.start_color()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)
+        curses.init_pair(3, curses.COLOR_RED, -1)
+        curses.init_pair(4, curses.COLOR_CYAN, -1)
+        curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
+
+        COL_OK = curses.color_pair(1)
+        COL_WARN = curses.color_pair(2)
+        COL_ERR = curses.color_pair(3)
+        COL_CYAN = curses.color_pair(4)
+        COL_BAR = curses.color_pair(5)
+        COL_DIM = curses.A_DIM
+
+        selected = 0
+        refresh_interval = 5  # seconds
+        last_refresh = 0
+
+        while True:
+            now = time.time()
+            if now - last_refresh >= refresh_interval:
+                gpu_summary = _get_gpu_summary()
+                last_refresh = now
+
+            stdscr.erase()
+            height, width = stdscr.getmaxyx()
+
+            # Header
+            title = " GPU AVAILABILITY "
+            stdscr.attron(COL_BAR | curses.A_BOLD)
+            stdscr.addstr(0, 0, " " * width)
+            stdscr.addstr(0, (width - len(title)) // 2, title)
+            stdscr.attroff(COL_BAR | curses.A_BOLD)
+
+            # Column headers
+            header = f"  {'Partition':<22} {'GPU':<12} {'VRAM':<6} {'Max':<5} {'Avail':<7} {'Nodes':<9} {'Total'}"
+            stdscr.attron(curses.A_BOLD)
+            stdscr.addstr(2, 0, header[:width-1])
+            stdscr.attroff(curses.A_BOLD)
+            stdscr.addstr(3, 0, "─" * min(85, width-1))
+
+            # List partitions
+            list_start = 4
+            list_height = height - 6
+            total = len(gpu_summary)
+
+            # Scroll offset
+            if total > list_height:
+                if selected >= list_height:
+                    offset = min(selected - list_height + 1, total - list_height)
+                else:
+                    offset = 0
+            else:
+                offset = 0
+
+            for i, entry in enumerate(gpu_summary[offset:offset + list_height]):
+                idx = offset + i
+                y = list_start + i
+                if y >= height - 2:
+                    break
+
+                partition = entry["partition"][:20]
+                gpu_type = entry["gpu_type"][:10]
+                vram = f"{entry['vram_gb']}GB" if entry["vram_gb"] else "?"
+                max_count = entry["max_count"]
+                max_avail = entry["max_available"]
+                nodes_free = entry["nodes_with_free"]
+                nodes_total = entry["nodes_total"]
+                total_gpus = entry["total_gpus"]
+                total_avail = entry["total_available"]
+
+                # Availability color and icon
+                if max_avail == 0:
+                    avail_col = COL_ERR
+                    icon = "●"
+                elif max_avail == max_count:
+                    avail_col = COL_OK
+                    icon = "○"
+                else:
+                    avail_col = COL_WARN
+                    icon = "◐"
+
+                is_selected = (idx == selected)
+                prefix = "▸ " if is_selected else "  "
+
+                if is_selected:
+                    stdscr.attron(COL_BAR | curses.A_BOLD)
+                    line = f"{prefix}{partition:<22} {gpu_type:<12} {vram:<6} {max_count:<5} {icon} {max_avail:<5} {nodes_free}/{nodes_total:<6} {total_avail}/{total_gpus}"
+                    stdscr.addstr(y, 0, " " * (width - 1))
+                    stdscr.addstr(y, 0, line[:width-1])
+                    stdscr.attroff(COL_BAR | curses.A_BOLD)
+                else:
+                    stdscr.addstr(y, 0, prefix)
+                    stdscr.attron(COL_CYAN)
+                    stdscr.addstr(f"{partition:<22} ")
+                    stdscr.attroff(COL_CYAN)
+                    stdscr.attron(COL_DIM)
+                    stdscr.addstr(f"{gpu_type:<12} ")
+                    stdscr.attroff(COL_DIM)
+                    stdscr.addstr(f"{vram:<6} {max_count:<5} ")
+                    stdscr.attron(avail_col)
+                    stdscr.addstr(f"{icon} {max_avail:<5} ")
+                    stdscr.attroff(avail_col)
+                    stdscr.addstr(f"{nodes_free}/{nodes_total:<6} ")
+                    stdscr.attron(COL_DIM)
+                    stdscr.addstr(f"{total_avail}/{total_gpus}")
+                    stdscr.attroff(COL_DIM)
+
+            # Footer
+            help_y = height - 1
+            keys = [("↑↓", "navigate"), ("r", "refresh"), ("q", "quit")]
+            stdscr.attron(COL_BAR)
+            stdscr.addstr(help_y, 0, " " * width)
+            x = 1
+            for key, desc in keys:
+                if x + len(key) + len(desc) + 3 >= width:
+                    break
+                stdscr.addstr(help_y, x, key, curses.A_BOLD)
+                stdscr.addstr(f" {desc}  ")
+                x += len(key) + len(desc) + 3
+            stdscr.attroff(COL_BAR)
+
+            stdscr.refresh()
+
+            # Input with timeout for auto-refresh
+            stdscr.timeout(1000)
+            try:
+                key = stdscr.getch()
+            except KeyboardInterrupt:
+                break
+
+            if key == -1:
+                continue
+            elif key in (ord('q'), ord('Q'), 27):
+                break
+            elif key in (ord('r'), ord('R')):
+                last_refresh = 0  # Force refresh
+            elif key == curses.KEY_UP or key == ord('k'):
+                if selected > 0:
+                    selected -= 1
+            elif key == curses.KEY_DOWN or key == ord('j'):
+                if selected < total - 1:
+                    selected += 1
+
+    curses.wrapper(main)
+    return 0
+
+
 def cmd_gpus(args):
     """Show max assignable GPUs per partition."""
     if getattr(args, "remote", None):
+        if getattr(args, "interactive", False):
+            return _run_remote_interactive(args, ["gpus", "-i"])
         return _run_remote(args, ["gpus"])
+
+    if getattr(args, "interactive", False):
+        return _interactive_gpus()
 
     gpu_summary = _get_gpu_summary()
 
@@ -1634,7 +1794,8 @@ def build_parser():
     logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of lines to show (default: 50, 0 for all)")
     logs_parser.set_defaults(func=cmd_logs)
 
-    gpus_parser = subparsers.add_parser("gpus", help="Show max assignable GPUs per GPU type")
+    gpus_parser = subparsers.add_parser("gpus", help="Show max assignable GPUs per partition")
+    gpus_parser.add_argument("-i", "--interactive", action="store_true", help="Interactive TUI mode")
     gpus_parser.set_defaults(func=cmd_gpus)
 
     return parser
