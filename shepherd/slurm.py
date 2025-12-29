@@ -265,11 +265,12 @@ def parse_shepherd_directives(script_path):
 def list_nodes():
     """List all nodes with their state and partition info.
 
-    Returns list of dicts with: node, partition, state, gres
+    Returns list of dicts with: node, partition, state, gres, gpus_available
     Returns empty list if sinfo unavailable.
     """
     try:
-        cmd = ["sinfo", "-h", "-N", "-o", "%N|%P|%T|%G"]
+        # Include GresUsed to calculate available GPUs
+        cmd = ["sinfo", "-h", "-N", "-o", "%N|%P|%T|%G|%b"]
         result = _run(cmd, timeout_sec=5)
         if not result["ok"]:
             return []
@@ -280,7 +281,7 @@ def list_nodes():
     seen = set()
     for line in result["stdout"].splitlines():
         parts = line.split("|")
-        if len(parts) < 4:
+        if len(parts) < 5:
             continue
         node = parts[0]
         if node in seen:
@@ -289,7 +290,20 @@ def list_nodes():
         partition = parts[1].rstrip("*")
         state = parts[2]
         gres = parts[3]
+        gres_used = parts[4] if len(parts) > 4 else ""
         gpu_type, gpu_count, vram_gb = _parse_gpu_info(gres)
+
+        # Parse used GPUs to calculate available
+        gpus_used = 0
+        if gres_used and "gpu:" in gres_used.lower():
+            # Format: gpu:RTX3090:6(IDX:...) or gpu:6
+            import re
+            match = re.search(r'gpu:[^:]*:(\d+)|gpu:(\d+)', gres_used.lower())
+            if match:
+                gpus_used = int(match.group(1) or match.group(2))
+
+        gpus_available = max(0, gpu_count - gpus_used) if gpu_count else 0
+
         nodes.append({
             "node": node,
             "partition": partition,
@@ -297,6 +311,7 @@ def list_nodes():
             "gpu_type": gpu_type,
             "gpu_count": gpu_count,
             "vram_gb": vram_gb,
+            "gpus_available": gpus_available,
         })
     return nodes
 

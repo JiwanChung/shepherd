@@ -435,6 +435,8 @@ class TUIApp:
             self._control_selected("pause")
         elif key == ord("u"):
             self._control_selected("unpause")
+        elif key == ord("d"):
+            self._delete_run()
         elif key == ord("b"):
             self.mode = "blacklist"
         elif key == ord("n"):
@@ -452,6 +454,8 @@ class TUIApp:
             self.log_view = "stdout"
         elif key == ord("2"):
             self.log_view = "stderr"
+        elif key == ord("3"):
+            self.log_view = "events"
         elif key in (ord("["), ord("-")):
             if self.right_panel_mode == "script":
                 self.script_scroll = max(0, self.script_scroll - 1)
@@ -515,7 +519,7 @@ class TUIApp:
         elif self.mode == "detail":
             self._render_detail()
         else:
-            left_width = min(width // 2, 50)
+            left_width = min(width * 2 // 3, 70)
             right_start = left_width + 1
             right_width = width - right_start
 
@@ -593,7 +597,7 @@ class TUIApp:
                 run_id = run["run_id"][:22]
                 job_id = str(run["job_id"] or "—")[:8]
                 hb = _format_ago(run["heartbeat"])[:5]
-                status_text = status.replace("_", " ")[:15]
+                status_text = status.replace("_", " ")
 
                 prefix = "▸ " if is_selected else "  "
 
@@ -773,10 +777,13 @@ class TUIApp:
             partitions = pf.get("partitions", [])
             current_idx = meta.get("current_partition_index", 0)
             for i, p in enumerate(partitions[:5]):
+                if row >= height - 3:
+                    break
                 marker = "▸" if i == current_idx else " "
                 col = self.COL_OK if i == current_idx else self.COL_DIM
                 self.stdscr.attron(col)
-                self.stdscr.addstr(row, start_x + 2, f"{marker} {p}")
+                text = f"{marker} {p}"[:width - 4]
+                self.stdscr.addstr(row, start_x + 2, text)
                 self.stdscr.attroff(col)
                 row += 1
 
@@ -849,7 +856,7 @@ class TUIApp:
 
         # Log type tabs
         self.stdscr.addstr(row, start_x + 1, "")
-        for name, key in [("stdout", "1"), ("stderr", "2")]:
+        for name, key in [("stdout", "1"), ("stderr", "2"), ("events", "3")]:
             if name == self.log_view:
                 self.stdscr.attron(curses.A_BOLD)
                 self.stdscr.addstr(f" [{key}:{name}] ")
@@ -860,22 +867,32 @@ class TUIApp:
                 self.stdscr.attroff(self.COL_DIM)
         row += 2
 
-        # Find log file
-        path = meta.get(f"{self.log_view}_path")
-        if path and os.path.exists(os.path.expanduser(path)):
-            source = "meta"
+        # Find log file based on view type
+        if self.log_view == "events":
+            path = fs.run_file(run["run_id"], constants.EVENTS_FILENAME)
+            source = "shepherd"
+            if not os.path.exists(path):
+                path = None
         else:
-            path = None
-            script_path = meta.get("sbatch_script")
-            job_id = meta.get("slurm_job_id")
-            path = _find_slurm_output(script_path, job_id, self.log_view)
-            source = "slurm" if path else None
+            path = meta.get(f"{self.log_view}_path")
+            if path and os.path.exists(os.path.expanduser(path)):
+                source = "meta"
+            else:
+                path = None
+                script_path = meta.get("sbatch_script")
+                job_id = meta.get("slurm_job_id")
+                path = _find_slurm_output(script_path, job_id, self.log_view)
+                source = "slurm" if path else None
 
-        if not path:
-            fallback = fs.run_file(run["run_id"], f"{self.log_view}.log")
-            if os.path.exists(fallback):
-                path = fallback
-                source = "shepherd"
+            if not path:
+                # Check shepherd-managed log files
+                if self.log_view == "stdout":
+                    fallback = fs.run_file(run["run_id"], constants.STDOUT_FILENAME)
+                else:
+                    fallback = fs.run_file(run["run_id"], constants.STDERR_FILENAME)
+                if os.path.exists(fallback):
+                    path = fallback
+                    source = "shepherd"
 
         if not path:
             self.stdscr.attron(self.COL_DIM)
@@ -1026,7 +1043,7 @@ class TUIApp:
         height, width = self.stdscr.getmaxyx()
 
         if self.mode == "dashboard":
-            keys = [("j/k", "nav"), ("Tab", "panel"), ("r", "restart"), ("n", "new"), ("?", "help"), ("q", "quit")]
+            keys = [("j/k", "nav"), ("r", "restart"), ("s", "stop"), ("d", "del"), ("?", "help"), ("q", "quit")]
         elif self.mode == "detail":
             keys = [("r", "restart"), ("s", "stop"), ("d", "delete"), ("Bksp", "back")]
         elif self.mode == "blacklist":
@@ -1159,13 +1176,18 @@ class TUIApp:
         self.mode = "dashboard"
 
     def _new_run_wizard(self):
-        run_id = self._prompt("Run ID: ")
-        if not run_id:
-            return
-
         sbatch_script = self._prompt("Script path: ")
         if not sbatch_script:
             return
+
+        # Auto-generate run_id from script name
+        script_name = os.path.basename(sbatch_script)
+        base_name = os.path.splitext(script_name)[0]
+
+        # Ensure unique run_id by appending timestamp if needed
+        run_id = base_name
+        if os.path.exists(fs.run_dir(run_id)):
+            run_id = f"{base_name}_{int(time.time())}"
 
         run_dir = fs.run_dir(run_id)
         os.makedirs(run_dir, exist_ok=True)

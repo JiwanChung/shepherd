@@ -6,6 +6,8 @@ RUNS_DIR = os.path.join(STATE_DIR, "runs")
 LOCKS_DIR = os.path.join(STATE_DIR, "locks")
 BLACKLIST_PATH = os.path.join(STATE_DIR, "blacklist.json")
 DAEMON_PID_PATH = os.path.join(STATE_DIR, "daemon.pid")
+REMOTES_PATH = os.path.join(STATE_DIR, "remotes.json")
+LOCAL_CONFIG_PATH = os.path.join(STATE_DIR, "config.json")
 
 META_FILENAME = "meta.json"
 CONTROL_FILENAME = "control.json"
@@ -15,6 +17,9 @@ FAILURE_FILENAME = "failure.json"
 FINAL_FILENAME = "final.json"
 ENDED_FILENAME = "ended.json"
 BADNODE_EVENTS_FILENAME = "badnode_events.log"
+STDOUT_FILENAME = "slurm.out"
+STDERR_FILENAME = "slurm.err"
+EVENTS_FILENAME = "events.log"
 
 # Exit codes defined by the wrapper contract.
 EXIT_NODE_FAULT = 42
@@ -32,9 +37,11 @@ DEFAULT_RESET_TO_PREFERRED_SEC = 3600
 
 
 def set_state_dir(path):
-    global STATE_DIR, RUNS_DIR, LOCKS_DIR, BLACKLIST_PATH, DAEMON_PID_PATH
+    global STATE_DIR, RUNS_DIR, LOCKS_DIR, BLACKLIST_PATH, DAEMON_PID_PATH, REMOTES_PATH, LOCAL_CONFIG_PATH
     STATE_DIR = path
     RUNS_DIR = os.path.join(STATE_DIR, "runs")
     LOCKS_DIR = os.path.join(STATE_DIR, "locks")
     BLACKLIST_PATH = os.path.join(STATE_DIR, "blacklist.json")
     DAEMON_PID_PATH = os.path.join(STATE_DIR, "daemon.pid")
+    REMOTES_PATH = os.path.join(STATE_DIR, "remotes.json")
+    LOCAL_CONFIG_PATH = os.path.join(STATE_DIR, "config.json")

@@ -1,4 +1,5 @@
 import atexit
+import datetime
 import os
 import shlex
 import signal
@@ -10,8 +11,23 @@ from shepherd import blacklist
 from shepherd import constants
 from shepherd import fs
 from shepherd import heartbeat
+from shepherd import remotes
 from shepherd import slurm
 from shepherd import state
+
+
+def _log_event(run_id, event_type, message, details=None):
+    """Append an event to the run's event log."""
+    path = fs.run_file(run_id, constants.EVENTS_FILENAME)
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {event_type}: {message}"
+    if details:
+        line += f" | {details}"
+    line += "\n"
+    existing = fs.read_text(path)
+    if isinstance(existing, dict):
+        existing = ""
+    fs.atomic_write_text(path, (existing or "") + line)
 
 
 def is_daemon_running():
@@ -164,26 +180,35 @@ class ShepherdDaemon:
 
                     if sacct_state == "COMPLETED" and exit_code == 0:
                         # Job completed successfully - mark as done for run_once
+                        _log_event(run_id, "STATE", f"RUNNING -> {sacct_state}", f"node={node}")
                         if run_mode == "run_once" and final is None:
                             state.write_final(run_id)
                             state.write_ended(run_id, {"reason": "completed", "timestamp": now})
                             return
                     elif sacct_state in ("FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL"):
                         # Job failed - record for restart and maybe blacklist
-                        if node and sacct_state in ("NODE_FAIL", "TIMEOUT"):
+                        _log_event(run_id, "STATE", f"RUNNING -> {sacct_state}", f"node={node}, exit_code={exit_code}")
+                        if node and sacct_state in ("NODE_FAIL", "TIMEOUT") and not meta.get("no_blacklist"):
                             ttl = meta.get("blacklist_ttl_sec")
                             blacklist.add_node(node, ttl_sec=ttl, reason=sacct_state)
+                            _log_event(run_id, "BLACKLIST", f"Added {node}", f"reason={sacct_state}")
                         self._record_restart(run_id, meta, now, reason=sacct_state.lower())
                         state.update_meta(run_id, {"slurm_job_id": None})
                         return
                     elif sacct_state in ("CANCELLED", "PREEMPTED"):
                         # Preempted - restart without penalty
+                        _log_event(run_id, "STATE", f"RUNNING -> {sacct_state}", f"node={node}")
                         state.update_meta(run_id, {"slurm_job_id": None, "next_submit_at": now})
                         return
 
                 slurm_job_id = None
 
         if slurm_state:
+            # Log state change if different from previous
+            prev_state = meta.get("slurm_state")
+            if slurm_state != prev_state:
+                details = f"reason={slurm_reason}" if slurm_reason else None
+                _log_event(run_id, "STATE", f"{prev_state or 'None'} -> {slurm_state}", details)
             state.update_meta(
                 run_id,
                 {"slurm_state": slurm_state, "slurm_reason": slurm_reason},
@@ -205,6 +230,50 @@ class ShepherdDaemon:
             return
 
         if slurm_job_id and slurm_state:
+            # Check for PENDING with unavailable nodes - but only trigger fallback
+            # after a grace period (nodes may become available when other jobs finish)
+            if slurm_state == "PENDING" and slurm_reason and "ReqNodeNotAvail" in slurm_reason:
+                # Only fallback if ALL nodes are truly unavailable (down/drained),
+                # not just busy. Check if reason contains "UnavailableNodes" which
+                # indicates nodes are down, not just allocated.
+                # Also require a grace period before giving up on the partition.
+                pending_grace_sec = meta.get("pending_node_grace_sec", 300)  # 5 min default
+                first_pending_at = meta.get("first_pending_unavail_at")
+
+                if first_pending_at is None:
+                    # First time seeing this state - record timestamp but don't act yet
+                    state.update_meta(run_id, {"first_pending_unavail_at": now})
+                elif now - int(first_pending_at) >= pending_grace_sec:
+                    # Been waiting long enough - try partition fallback
+                    fallback_config = meta.get("partition_fallback")
+                    if fallback_config and fallback_config.get("partitions"):
+                        partitions = fallback_config.get("partitions", [])
+                        current_index = meta.get("current_partition_index", 0)
+                        if current_index < len(partitions) - 1:
+                            # Cancel job and move to next partition
+                            _log_event(run_id, "FALLBACK", f"{partitions[current_index]} -> {partitions[current_index + 1]}", f"reason={slurm_reason}")
+                            slurm.scancel(slurm_job_id)
+                            next_index = current_index + 1
+                            state.update_meta(
+                                run_id,
+                                {
+                                    "slurm_job_id": None,
+                                    "current_partition_index": next_index,
+                                    "partition_failure_count": 0,
+                                    "last_partition_fallback_at": now,
+                                    "first_pending_unavail_at": None,  # Reset for new partition
+                                    "restart_reason": f"no_nodes_available_{partitions[current_index]}",
+                                },
+                            )
+                            # Submit immediately with new partition
+                            updated_meta = fs.read_json(fs.run_file(run_id, constants.META_FILENAME))
+                            if updated_meta and not updated_meta.get("_corrupt"):
+                                self._submit_run(run_id, updated_meta, now)
+                            return
+            else:
+                # Not in ReqNodeNotAvail state - reset the timer
+                if meta.get("first_pending_unavail_at"):
+                    state.update_meta(run_id, {"first_pending_unavail_at": None})
             return
 
         if self._finalize_if_complete(run_id, meta, final, run_mode):
@@ -263,6 +332,8 @@ class ShepherdDaemon:
         state.update_meta(run_id, updates)
 
     def _apply_failure_blacklist(self, run_id, meta, failure):
+        if meta.get("no_blacklist"):
+            return
         if not isinstance(failure, dict):
             return
         exit_code = failure.get("exit_code")
@@ -402,18 +473,25 @@ class ShepherdDaemon:
             extra_args = [arg for arg in extra_args if not arg.startswith("--partition")]
             extra_args.append(partition_arg)
 
-        bl_data = blacklist.load_blacklist()
-        limit = meta.get("blacklist_limit", constants.DEFAULT_BLACKLIST_LIMIT)
-        exclude_nodes = blacklist.exclude_list(bl_data, limit=limit)
-        if exclude_nodes:
-            extra_args = extra_args + [f"--exclude={','.join(exclude_nodes)}"]
+        # Add exclude list unless no_blacklist is set
+        if not meta.get("no_blacklist"):
+            bl_data = blacklist.load_blacklist()
+            limit = meta.get("blacklist_limit", constants.DEFAULT_BLACKLIST_LIMIT)
+            exclude_nodes = blacklist.exclude_list(bl_data, limit=limit)
+            if exclude_nodes:
+                extra_args = extra_args + [f"--exclude={','.join(exclude_nodes)}"]
 
         # Auto-wrap script with shepherd wrapper
         run_mode = meta.get("run_mode", "run_once")
         wrapped_script = self._generate_wrapped_script(script_path, run_id, run_mode)
 
+        # Log the sbatch command
+        sbatch_cmd = "sbatch " + " ".join(extra_args)
+        _log_event(run_id, "SUBMIT", sbatch_cmd)
+
         result = slurm.sbatch_script(wrapped_script, extra_args=extra_args)
         if not result["ok"]:
+            _log_event(run_id, "SUBMIT_FAILED", result.get("stderr", "unknown error"))
             retry_now = self._handle_sbatch_failure(run_id, meta, now, result)
             if retry_now:
                 # Reload meta and retry immediately with new partition
@@ -423,6 +501,7 @@ class ShepherdDaemon:
             return
 
         job_id = _parse_sbatch_job_id(result["stdout"])
+        _log_event(run_id, "SUBMITTED", f"job_id={job_id}")
         updates = {
             "slurm_job_id": job_id,
             "slurm_state": "PENDING",
@@ -449,7 +528,16 @@ class ShepherdDaemon:
                 original = f.read()
         except Exception:
             # Fallback to just running the script directly
+            shepherd_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            conda_activation = remotes.get_local_conda_activation_script()
+            run_dir = fs.run_dir(run_id)
+            stdout_path = os.path.join(run_dir, constants.STDOUT_FILENAME)
+            stderr_path = os.path.join(run_dir, constants.STDERR_FILENAME)
             return f"""#!/bin/bash
+#SBATCH --output={stdout_path}
+#SBATCH --error={stderr_path}
+export PYTHONPATH="{shepherd_path}:$PYTHONPATH"
+{conda_activation}
 python -m shepherd.wrapper --run-id {run_id} --run-mode {run_mode} -- bash {expanded_path}
 """
 
@@ -465,6 +553,9 @@ python -m shepherd.wrapper --run-id {run_id} --run-mode {run_mode} -- bash {expa
                 if stripped.startswith("#!"):
                     sbatch_lines.append(line)
                 elif stripped.startswith("#SBATCH"):
+                    # Skip --output/--error, we'll add our own
+                    if "--output" in stripped or "--error" in stripped or "-o " in stripped or "-e " in stripped:
+                        continue
                     sbatch_lines.append(line)
                 elif stripped.startswith("#SHEPHERD"):
                     # Skip #SHEPHERD directives - already processed
@@ -477,12 +568,28 @@ python -m shepherd.wrapper --run-id {run_id} --run-mode {run_mode} -- bash {expa
             else:
                 body_lines.append(line)
 
+        # Add output/error directives pointing to run directory
+        run_dir = fs.run_dir(run_id)
+        stdout_path = os.path.join(run_dir, constants.STDOUT_FILENAME)
+        stderr_path = os.path.join(run_dir, constants.STDERR_FILENAME)
+        sbatch_lines.append(f"#SBATCH --output={stdout_path}")
+        sbatch_lines.append(f"#SBATCH --error={stderr_path}")
+
         # Build wrapped script using heredoc for robustness with complex scripts
         body = "\n".join(body_lines)
         wrapped = "\n".join(sbatch_lines)
+
+        # Get shepherd's install path for PYTHONPATH
+        shepherd_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        # Get conda activation script if configured
+        conda_activation = remotes.get_local_conda_activation_script()
+
         wrapped += f"""
 
 # Auto-wrapped by shepherd
+export PYTHONPATH="{shepherd_path}:$PYTHONPATH"
+{conda_activation}
 python -m shepherd.wrapper --run-id {run_id} --run-mode {run_mode} -- bash << '__SHEPHERD_SCRIPT_END__'
 {body}
 __SHEPHERD_SCRIPT_END__

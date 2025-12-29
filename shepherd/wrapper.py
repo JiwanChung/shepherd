@@ -115,13 +115,22 @@ def try_numba():
     d_out = cuda.to_device(out)
     add[1, 128](d_a, d_b, d_out)
     d_out.copy_to_host()
+tested = False
 for fn in (try_torch, try_cupy, try_numba):
     try:
         fn()
-        sys.exit(0)
-    except Exception:
-        continue
-sys.exit(1)
+        tested = True
+        print(f"CUDA_OK: {fn.__name__}", file=sys.stderr)
+        sys.exit(0)  # Success
+    except ImportError:
+        continue  # Package not installed, try next
+    except Exception as e:
+        # Package installed but CUDA failed - this is a real failure
+        print(f"CUDA_FAIL: {fn.__name__}: {e}", file=sys.stderr)
+        sys.exit(2)
+# No packages installed - skip test but warn
+print("CUDA_SKIP: no torch/cupy/numba installed", file=sys.stderr)
+sys.exit(0)
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -130,7 +139,12 @@ sys.exit(1)
         text=True,
         check=False,
     )
-    if result.returncode != 0:
+    # Log the smoke test result for debugging
+    smoke_output = result.stderr.strip()
+    if smoke_output:
+        print(f"[shepherd] smoke test: {smoke_output}", file=sys.stderr)
+    # Only fail on exit code 2 (actual CUDA failure), not 1 (no packages) or 0 (success)
+    if result.returncode == 2:
         detail = result.stderr.strip() or result.stdout.strip()
         raise FailureExit(constants.EXIT_CUDA_FAILURE, "cuda_smoke_failed", detail)
 
