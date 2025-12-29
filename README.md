@@ -59,6 +59,7 @@ Running ML training jobs on shared Slurm clusters is painful:
 ### 🖥️ Modern Interface
 - **Interactive TUI** — Beautiful terminal UI
 - **Node management** — Ban/unban with keyboard
+- **GPU smoke tests** — Test CUDA on all nodes
 - **Log viewer** — Tail logs in real-time
 - **Status icons** — See state at a glance
 
@@ -169,6 +170,28 @@ A modern terminal interface for monitoring and controlling jobs:
 | `Enter` | Fullscreen detail view |
 | `?` | Help |
 | `q` | Quit |
+
+### Nodes TUI
+
+The nodes view (`shepherd nodes`) provides GPU smoke testing:
+
+| Key | Action |
+|-----|--------|
+| `↑/↓` | Navigate nodes |
+| `Enter` | Ban/unban node |
+| `s` | Run CUDA smoke tests on all nodes |
+| `r` | Refresh node list |
+| `q` | Quit |
+
+Smoke test results:
+| Icon | Status |
+|------|--------|
+| `✓` | CUDA working |
+| `✗` | CUDA failed |
+| `○` | No CUDA libs installed |
+| `●` | Node busy (no free GPUs) |
+| `⊘` | QOS/partition error |
+| `⏱` | Timeout |
 
 ### Status Icons
 
@@ -301,15 +324,38 @@ shepherd control stop --run-id my-job
 shepherd control restart --run-id my-job
 
 # Node management
-shepherd nodes                                         # list all nodes with blacklist status
+shepherd nodes                                         # interactive TUI (press 's' for smoke tests)
+shepherd nodes --list                                  # list all nodes
 shepherd nodes ban --node node001 --ttl 3600 --reason "Bad GPU"
 shepherd nodes unban --node node001
+
+# View logs
+shepherd logs --run-id my-job                          # stdout (last 50 lines)
+shepherd logs --run-id my-job --stderr                 # stderr
+shepherd logs --run-id my-job -f                       # follow (tail -f)
+shepherd logs --run-id my-job -n 100                   # last 100 lines
+
+# Remote config
+shepherd --remote mycluster config list                # show all config
+shepherd --remote mycluster config set conda_env base  # set conda env
+
+# Sync code to remote
+shepherd --remote mycluster sync                       # sync and restart daemon
+shepherd --remote mycluster sync --no-restart          # sync without restart
 
 # TUI
 shepherd tui
 ```
 
 Add `--json` for machine-readable output. All commands support `--remote HOST` for remote execution.
+
+### Additional Flags
+
+| Flag | Description |
+|------|-------------|
+| `--no-blacklist` | Disable node blacklisting for this run |
+| `--no-sync` | Skip auto-sync to remote |
+| `--no-daemon` | Skip auto-starting remote daemon |
 
 ## Configuration
 
@@ -347,8 +393,12 @@ All state lives under `~/.slurm_shepherd/`:
 │       ├── failure.json       # Last failure info
 │       ├── final.json         # Completion marker
 │       ├── ended.json         # Termination reason
+│       ├── events.log         # Run event history
+│       ├── slurm.out          # SLURM stdout
+│       ├── slurm.err          # SLURM stderr
 │       └── badnode_events.log # Node failure history
 ├── blacklist.json             # Global node blacklist
+├── remotes.json               # Remote cluster configs
 ├── locks/                     # Per-run locks
 └── daemon.pid                 # Daemon PID file
 ```
