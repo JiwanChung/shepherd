@@ -271,39 +271,40 @@ def list_nodes():
     Returns list of dicts with: node, partition, state, gres, gpus_available
     Returns empty list if sinfo unavailable.
     """
+    # Use scontrol for accurate GPU allocation info (sinfo %b often shows null)
     try:
-        # Include GresUsed to calculate available GPUs
-        cmd = ["sinfo", "-h", "-N", "-o", "%N|%P|%T|%G|%b"]
-        result = _run(cmd, timeout_sec=5)
+        cmd = ["scontrol", "show", "node", "-o"]
+        result = _run(cmd, timeout_sec=10)
         if not result["ok"]:
             return []
     except FileNotFoundError:
         return []
 
     nodes = []
-    seen = set()
     for line in result["stdout"].splitlines():
-        parts = line.split("|")
-        if len(parts) < 5:
+        if not line.startswith("NodeName="):
             continue
-        node = parts[0]
-        if node in seen:
-            continue
-        seen.add(node)
-        partition = parts[1].rstrip("*")
-        state = parts[2]
-        gres = parts[3]
-        gres_used = parts[4] if len(parts) > 4 else ""
+
+        # Parse key=value pairs
+        def get_val(key):
+            match = re.search(rf'{key}=(\S+)', line)
+            return match.group(1) if match else ""
+
+        node = get_val("NodeName")
+        state = get_val("State").lower()
+        partition = get_val("Partitions").split(",")[0] if get_val("Partitions") else ""
+        partition = partition.rstrip("*")
+        gres = get_val("Gres")
+
         gpu_type, gpu_count, vram_gb = _parse_gpu_info(gres)
 
-        # Parse used GPUs to calculate available
+        # Parse allocated GPUs from AllocTRES (e.g., "cpu=96,gres/gpu=6")
         gpus_used = 0
-        if gres_used and "gpu:" in gres_used.lower():
-            # Format: gpu:RTX3090:6(IDX:...) or gpu:6
-            import re
-            match = re.search(r'gpu:[^:]*:(\d+)|gpu:(\d+)', gres_used.lower())
+        alloc_tres = get_val("AllocTRES")
+        if alloc_tres:
+            match = re.search(r'gres/gpu[^=]*=(\d+)', alloc_tres)
             if match:
-                gpus_used = int(match.group(1) or match.group(2))
+                gpus_used = int(match.group(1))
 
         gpus_available = max(0, gpu_count - gpus_used) if gpu_count else 0
 
