@@ -1400,61 +1400,83 @@ def cmd_logs(args):
 
 
 def _get_gpu_summary():
-    """Aggregate GPU info by type, finding max per single node."""
+    """Aggregate GPU info by partition, finding max per single node."""
     from shepherd import slurm
     nodes = slurm.list_nodes()
 
-    # Aggregate by GPU type
-    gpu_types = {}  # gpu_type -> {max_count, max_available, vram, partitions, nodes_total, nodes_available}
+    # Aggregate by partition
+    partitions = {}
     for node in nodes:
-        gpu_type = node.get("gpu_type")
-        if not gpu_type:
+        partition = node.get("partition", "")
+        if not partition:
             continue
 
+        gpu_type = node.get("gpu_type")
         gpu_count = node.get("gpu_count", 0)
         gpus_available = node.get("gpus_available", 0)
         vram = node.get("vram_gb", 0)
-        partition = node.get("partition", "")
         state = node.get("state", "")
 
-        if gpu_type not in gpu_types:
-            gpu_types[gpu_type] = {
+        if partition not in partitions:
+            partitions[partition] = {
                 "max_count": 0,
                 "max_available": 0,
                 "vram_gb": vram,
-                "partitions": set(),
+                "gpu_type": gpu_type,
                 "nodes_total": 0,
                 "nodes_with_free": 0,
+                "total_gpus": 0,
+                "total_available": 0,
             }
 
-        entry = gpu_types[gpu_type]
+        entry = partitions[partition]
         entry["max_count"] = max(entry["max_count"], gpu_count)
         entry["max_available"] = max(entry["max_available"], gpus_available)
         entry["nodes_total"] += 1
+        entry["total_gpus"] += gpu_count
+        entry["total_available"] += gpus_available
         if gpus_available > 0 and state in ("idle", "mixed"):
             entry["nodes_with_free"] += 1
-        if partition:
-            entry["partitions"].add(partition)
+        # Update gpu_type if not set
+        if not entry["gpu_type"] and gpu_type:
+            entry["gpu_type"] = gpu_type
+        if not entry["vram_gb"] and vram:
+            entry["vram_gb"] = vram
 
-    # Convert to list and sort by VRAM (highest first)
+    # Convert to list and sort by VRAM (highest first), then by max available
     result = []
-    for gpu_type, info in gpu_types.items():
+    for partition, info in partitions.items():
+        if info["max_count"] == 0:  # Skip non-GPU partitions
+            continue
         result.append({
-            "gpu_type": gpu_type,
+            "partition": partition,
+            "gpu_type": info["gpu_type"] or "unknown",
             "max_count": info["max_count"],
             "max_available": info["max_available"],
             "vram_gb": info["vram_gb"],
-            "partitions": sorted(info["partitions"]),
             "nodes_total": info["nodes_total"],
             "nodes_with_free": info["nodes_with_free"],
+            "total_gpus": info["total_gpus"],
+            "total_available": info["total_available"],
         })
 
-    result.sort(key=lambda x: (-x["vram_gb"], -x["max_count"], x["gpu_type"]))
+    result.sort(key=lambda x: (-x["vram_gb"], -x["max_available"], -x["max_count"], x["partition"]))
     return result
 
 
+# ANSI color codes
+class _C:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    CYAN = "\033[36m"
+
+
 def cmd_gpus(args):
-    """Show max assignable GPUs per GPU type."""
+    """Show max assignable GPUs per partition."""
     if getattr(args, "remote", None):
         return _run_remote(args, ["gpus"])
 
@@ -1465,24 +1487,53 @@ def cmd_gpus(args):
         return 0
 
     if not gpu_summary:
-        print("No GPU nodes found")
+        print("No GPU partitions found")
         return 0
 
-    # Print table
-    print(f"{'GPU Type':<16} {'VRAM':<8} {'Max/Node':<10} {'Available':<10} {'Nodes':<12} Partitions")
-    print("─" * 80)
+    # Print table header
+    header = f"{'Partition':<24} {'GPU':<14} {'VRAM':<7} {'Max':<5} {'Avail':<6} {'Nodes':<10} {'Total':<12}"
+    print(f"{_C.BOLD}{header}{_C.RESET}")
+    print("─" * 85)
 
     for entry in gpu_summary:
+        partition = entry["partition"]
         gpu_type = entry["gpu_type"]
         vram = f"{entry['vram_gb']}GB" if entry["vram_gb"] else "?"
         max_count = entry["max_count"]
         max_avail = entry["max_available"]
-        nodes_info = f"{entry['nodes_with_free']}/{entry['nodes_total']}"
-        partitions = ", ".join(entry["partitions"][:3])
-        if len(entry["partitions"]) > 3:
-            partitions += f" +{len(entry['partitions']) - 3}"
+        nodes_free = entry["nodes_with_free"]
+        nodes_total = entry["nodes_total"]
+        total_gpus = entry["total_gpus"]
+        total_avail = entry["total_available"]
 
-        print(f"{gpu_type:<16} {vram:<8} {max_count:<10} {max_avail:<10} {nodes_info:<12} {partitions}")
+        # Color based on availability
+        if max_avail == 0:
+            avail_color = _C.RED
+            status_icon = "●"  # full
+        elif max_avail == max_count:
+            avail_color = _C.GREEN
+            status_icon = "○"  # empty/available
+        else:
+            avail_color = _C.YELLOW
+            status_icon = "◐"  # partial
+
+        nodes_info = f"{nodes_free}/{nodes_total}"
+        total_info = f"{total_avail}/{total_gpus}"
+
+        # Build colored line
+        line = f"{_C.CYAN}{partition:<24}{_C.RESET}"
+        line += f"{_C.DIM}{gpu_type:<14}{_C.RESET}"
+        line += f"{vram:<7}"
+        line += f"{max_count:<5}"
+        line += f"{avail_color}{status_icon} {max_avail:<4}{_C.RESET}"
+        line += f"{nodes_info:<10}"
+        line += f"{_C.DIM}{total_info:<12}{_C.RESET}"
+
+        print(line)
+
+    # Legend
+    print()
+    print(f"{_C.DIM}Max: max GPUs on single node | Avail: max available on single node | Total: cluster-wide{_C.RESET}")
 
     return 0
 
